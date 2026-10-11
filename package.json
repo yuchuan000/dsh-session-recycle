@@ -1,0 +1,55 @@
+{
+  "name": "dsh-session-recycle",
+  "version": "0.1.0",
+  "description": "Delete DeepSeek Harness sessions from the UI, with a recycle bin instead of a hard delete. Sidebar menu + header button, native tool, no extra HTTP route.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "session",
+    "delete",
+    "recycle-bin",
+    "trash",
+    "session-management"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yuchuan000/dsh-session-recycle.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yuchuan000/dsh-session-recycle/issues"
+  },
+  "homepage": "https://github.com/yuchuan000/dsh-session-recycle#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.2"
+  }
+}
