@@ -28,6 +28,10 @@ window.__ModuleLoader__.load({
     const RECYCLE_ID = 'session-recycle-recycled'
     const DIALOG_ID = 'session-recycle-dialog'
     const TOAST_ID = 'session-recycle-toast'
+    // The deletion preferences, moved off the page and behind a button. They
+    // render from the overlay slot like the confirm dialog, so the panel itself
+    // stays a plain list.
+    const CONFIG_ID = 'session-recycle-config'
     const EVENT = 'dsh-session-recycle:delete'
 
     // --- locale -----------------------------------------------------------------
@@ -54,6 +58,10 @@ window.__ModuleLoader__.load({
       'dialog.notFound': '未能在会话列表中找到该会话，请刷新页面后重试。',
       'dialog.alreadyGone': '该会话已被删除，正在刷新列表…',
       'settings.nav': '会话删除',
+      'settings.config': '配置',
+      'settings.configTitle': '删除设置',
+      'settings.configDesc': '这里的勾选改完立即生效，关掉即生效完毕。',
+      'settings.close': '关闭',
       'settings.behaviour': '删除行为',
       'settings.confirmSingleDelete': '删除单个会话时先确认',
       'settings.confirmSingleDeleteHint': '关闭后点删除会直接执行，不再弹确认框。',
@@ -85,7 +93,7 @@ window.__ModuleLoader__.load({
       'settings.restored': '已还原，可在会话列表中找到它。',
       'settings.restoredGrouped': '已还原，并已放回「{name}」分组。',
       'batch.selected': '已选 {n} 条',
-      'settings.selectAll': '全选',
+      'settings.selectAll': '全选本页',
       'settings.selectOne': '选择这一条',
       'settings.restorePicked': '恢复所选',
       'settings.restoredMany': '已恢复 {n} 条，其中 {g} 条已放回原分组。',
@@ -118,6 +126,12 @@ window.__ModuleLoader__.load({
       'settings.openRecycle': '打开回收站',
       'settings.recycleCount': '回收站：{n} 条待处理',
       'settings.recycleEmptyCount': '回收站是空的',
+
+      // 分页器（两个列表共用）。
+      'settings.pagerPrev': '上一页',
+      'settings.pagerNext': '下一页',
+      'settings.pageSize': '每页',
+      'settings.pagePosition': '第 {page}/{pages} 页',
     }
 
     const en = {
@@ -140,6 +154,10 @@ window.__ModuleLoader__.load({
       'dialog.notFound': 'Could not find this session in the session list. Refresh the page and try again.',
       'dialog.alreadyGone': 'This session was already deleted. Refreshing the list…',
       'settings.nav': 'Session deletion',
+      'settings.config': 'Settings',
+      'settings.configTitle': 'Deletion settings',
+      'settings.configDesc': 'Every tick here applies immediately — just close this when you are done.',
+      'settings.close': 'Close',
       'settings.behaviour': 'Behaviour',
       'settings.confirmSingleDelete': 'Confirm before deleting a session',
       'settings.confirmSingleDeleteHint': 'When off, clicking delete acts immediately with no dialog.',
@@ -171,7 +189,7 @@ window.__ModuleLoader__.load({
       'settings.restored': 'Restored. It is back in the session list.',
       'settings.restoredGrouped': 'Restored, and put back in "{name}".',
       'batch.selected': '{n} selected',
-      'settings.selectAll': 'Select all',
+      'settings.selectAll': 'Select page',
       'settings.selectOne': 'Select this entry',
       'settings.restorePicked': 'Restore selected',
       'settings.restoredMany': 'Restored {n} entry(ies); {g} went back to their group.',
@@ -205,6 +223,12 @@ window.__ModuleLoader__.load({
       'settings.openRecycle': 'Open the recycle bin',
       'settings.recycleCount': 'Recycle bin: {n} pending',
       'settings.recycleEmptyCount': 'The recycle bin is empty',
+
+      // The pager, shared by both pick-lists.
+      'settings.pagerPrev': 'Previous',
+      'settings.pagerNext': 'Next',
+      'settings.pageSize': 'Per page',
+      'settings.pagePosition': 'Page {page} of {pages}',
     }
 
     let localeSvc = null
@@ -280,6 +304,35 @@ window.__ModuleLoader__.load({
         return false
       }
     }
+
+    // --- config dialog -------------------------------------------------------------
+    //
+    // The three preferences used to sit at the top of the session list, so every
+    // visit opened on a form the user had already answered — pushing the list,
+    // the reason the page exists, below the fold. They live behind the header's
+    // Configure button now, and the page is a list and nothing else.
+    //
+    // The state is module-level and the dialog renders from the overlay slot,
+    // like the confirm dialog. The button that opens it sits deep inside the
+    // settings modal, so an overlay entry is the one place guaranteed to paint
+    // above it.
+    const configDialogState = { open: false, listeners: new Set() }
+
+    function configDialogSubscribe(listener) {
+      configDialogState.listeners.add(listener)
+      return () => { configDialogState.listeners.delete(listener) }
+    }
+
+    function setConfigDialogOpen(open) {
+      if (configDialogState.open === open) return
+      configDialogState.open = open
+      for (const listener of [...configDialogState.listeners]) {
+        try { listener() } catch { /* a broken subscriber never blocks others */ }
+      }
+    }
+
+    function openConfigDialog() { setConfigDialogOpen(true) }
+    function closeConfigDialog() { setConfigDialogOpen(false) }
 
     function fallbackLang() {
       if (typeof navigator === 'undefined') return 'zh'
@@ -946,6 +999,26 @@ window.__ModuleLoader__.load({
       background: 'transparent', color: 'var(--dsw-alias-state-error-primary, #e5484d)',
     }
     const dangerOutlineBtnOffStyle = { ...dangerOutlineBtnStyle, opacity: 0.5, cursor: 'default' }
+    const pagerStyle = {
+      display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6,
+      marginTop: 8, paddingTop: 8,
+      borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
+    }
+    /** The current page's button: same shape, marked rather than disabled. */
+    const pagerPageOnStyle = {
+      ...ghostBtnStyle, fontWeight: 600,
+      borderColor: 'var(--dsw-alias-interactive-bg-primary, #3b82f6)',
+      color: 'var(--dsw-alias-interactive-bg-primary, #3b82f6)',
+    }
+    const pageSizeSelectStyle = {
+      padding: '3px 6px', fontSize: 12, borderRadius: 6,
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+      background: 'transparent', color: 'var(--dsw-alias-label-primary, inherit)',
+    }
+    const separatorStyle = {
+      height: 1, margin: '12px 0 4px',
+      background: 'var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
+    }
 
     /**
      * Format a millisecond timestamp for a row's meta line.
@@ -967,6 +1040,134 @@ window.__ModuleLoader__.load({
       if (typeof value !== 'string' || value.length === 0) return ''
       const parts = value.split(/[\\/]+/).filter(Boolean)
       return parts.slice(-2).join('/')
+    }
+
+    // --- pager -------------------------------------------------------------------
+    //
+    // Both pick-lists grow with the store, so they are paged rather than left to
+    // run off the bottom of the modal. Paging also gives "select all" a
+    // meaning the user can see: it means the rows in front of them, not sixty
+    // rows they have to scroll past to audit.
+    //
+    // The page size is a local preference (localStorage), not a host setting:
+    // how many rows fit on a screen is a property of the screen, and nothing
+    // outside this client has any use for the number.
+
+    const PAGE_SIZE_KEY = 'session-recycle:pageSize'
+    const PAGE_SIZES = [20, 50, 100, 200]
+    const DEFAULT_PAGE_SIZE = 50
+
+    function readPageSize() {
+      try {
+        const value = Number(window.localStorage?.getItem(PAGE_SIZE_KEY))
+        if (PAGE_SIZES.includes(value)) return value
+      } catch { /* no storage (private mode) — the default stands */ }
+      return DEFAULT_PAGE_SIZE
+    }
+
+    function writePageSize(value) {
+      try { window.localStorage?.setItem(PAGE_SIZE_KEY, String(value)) } catch { /* preference only */ }
+    }
+
+    /**
+     * The page numbers to render, with '…' where the run is broken.
+     *
+     * The first and last pages and the current one (plus its neighbours) are
+     * always reachable: a pager that only ever shows 1 2 3 cannot tell you that
+     * you are on page 40 of 60.
+     *
+     * @param page - zero-based current page.
+     * @param pageCount - total pages, at least 1.
+     * @returns 1-based page numbers with the string '…' between runs.
+     */
+    function pageWindow(page, pageCount) {
+      const last = pageCount - 1
+      const wanted = new Set([0, 1, last - 1, last, page - 1, page, page + 1])
+      const indexes = [...wanted]
+        .filter(index => index >= 0 && index <= last)
+        .sort((a, b) => a - b)
+      const out = []
+      let previous = -1
+      for (const index of indexes) {
+        if (previous >= 0 && index - previous > 1) out.push('…')
+        out.push(index + 1)
+        previous = index
+      }
+      return out
+    }
+
+    /** The list footer: how many rows, which page, and how many per page. */
+    function Pager(props) {
+      const __ = props.__ || t
+      const { page, pageCount, total, pageSize, onPage, onPageSize } = props
+      const children = [
+        React.createElement('span', {
+          key: 'count', style: { ...metaStyle, margin: 0 },
+        }, __('settings.count', { n: total })),
+      ]
+      // With one page there is nothing to navigate; the count and the size
+      // selector still belong to the footer, so only the buttons drop out.
+      if (pageCount > 1) {
+        children.push(React.createElement('span', {
+          key: 'pos', style: { ...metaStyle, margin: 0 },
+        }, __('settings.pagePosition', { page: page + 1, pages: pageCount })))
+        children.push(React.createElement('button', {
+          key: 'prev', type: 'button',
+          style: page <= 0 ? ghostBtnOffStyle : ghostBtnStyle,
+          disabled: page <= 0,
+          onClick: () => onPage(page - 1),
+        }, __('settings.pagerPrev')))
+        pageWindow(page, pageCount).forEach((token, index) => {
+          if (token === '…') {
+            children.push(React.createElement('span', {
+              key: `gap${index}`, style: { ...metaStyle, margin: 0, padding: '0 2px' },
+            }, '…'))
+            return
+          }
+          const target = token - 1
+          children.push(React.createElement('button', {
+            key: `p${token}`, type: 'button',
+            'aria-current': target === page ? 'page' : undefined,
+            style: target === page ? pagerPageOnStyle : ghostBtnStyle,
+            onClick: () => onPage(target),
+          }, String(token)))
+        })
+        children.push(React.createElement('button', {
+          key: 'next', type: 'button',
+          style: page >= pageCount - 1 ? ghostBtnOffStyle : ghostBtnStyle,
+          disabled: page >= pageCount - 1,
+          onClick: () => onPage(page + 1),
+        }, __('settings.pagerNext')))
+      }
+      if (total > 0) {
+        children.push(React.createElement('span', {
+          key: 'sizeLabel', style: { ...metaStyle, margin: 0, marginLeft: 'auto' },
+        }, __('settings.pageSize')))
+        children.push(React.createElement('select', {
+          key: 'size',
+          value: String(pageSize),
+          style: pageSizeSelectStyle,
+          'aria-label': __('settings.pageSize'),
+          onChange: (event) => onPageSize(Number(event.target.value)),
+        }, PAGE_SIZES.map(size => React.createElement('option', {
+          key: size, value: String(size),
+        }, String(size)))))
+      }
+      return React.createElement('div', { style: pagerStyle }, children)
+    }
+
+    /**
+     * The slice of `rows` the current page shows, clamping a page that the
+     * current filter or a deletion has left past the end.
+     *
+     * @returns { rows, page, pageCount } — `page` is zero-based and always in
+     *   range, so callers can feed it straight back to the pager.
+     */
+    function paginate(rows, page, pageSize) {
+      const pageCount = Math.max(1, Math.ceil(rows.length / pageSize))
+      const safe = Math.min(Math.max(page, 0), pageCount - 1)
+      const start = safe * pageSize
+      return { rows: rows.slice(start, start + pageSize), page: safe, pageCount }
     }
 
     // --- dialog -----------------------------------------------------------------
@@ -1138,14 +1339,168 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The main settings section: the deletion policy, the live session list,
-     * and the doorway to the recycle bin.
+     * The deletion preferences, behind the session list's Configure button.
+     *
+     * Everything that is a *policy* lives here and nothing that is a *row* does:
+     * the switches, the standing warning when the recycle bin is off, and the
+     * sweep for whatever the switch did not cover. The empty-group counts are
+     * fetched when the dialog opens rather than handed in, so the dialog owns
+     * the data it shows and the list behind it does not carry a second,
+     * unrelated load on every refresh.
+     */
+    function SettingsConfigDialog(props) {
+      const __ = (props && props.t) || t
+      useLocaleRevision()
+      const [, forceRender] = useState(0)
+      const [cleanup, setCleanup] = useState(null)
+      const [pruning, setPruning] = useState(false)
+      const [error, setError] = useState(null)
+      const open = configDialogState.open
+
+      useEffect(() => configDialogSubscribe(() => forceRender(n => n + 1)), [])
+      useEffect(() => settingsSubscribe(() => forceRender(n => n + 1)), [])
+
+      useEffect(() => {
+        if (!open) return undefined
+        let cancelled = false
+        setError(null)
+        // null means "unknown" (a failed read), so the button stays disabled
+        // rather than claiming there is nothing to sweep.
+        fetchCleanup()
+          .then((counts) => { if (!cancelled) setCleanup(counts) })
+          .catch(() => { if (!cancelled) setCleanup(null) })
+        return () => { cancelled = true }
+      }, [open])
+
+      /**
+       * Sweep the groups and the store folders a cleanup left empty.
+       *
+       * Host-side and idempotent: a folder goes only when it is actually empty
+       * and a group only when it has no session left, so pressing it twice is
+       * the same as pressing it once.
+       */
+      const onCleanup = useCallback(async () => {
+        if (pruning) return
+        setPruning(true)
+        setError(null)
+        try {
+          const removed = await pruneEmpty()
+          setCleanup(await fetchCleanup())
+          const total = removed.dirs.length + removed.workspaces.length
+          showToast(
+            total > 0
+              ? __('settings.cleaned', { dirs: removed.dirs.length, workspaces: removed.workspaces.length })
+              : __('settings.cleanupNothing'),
+            'success',
+          )
+          if (removed.failed.length > 0) {
+            setError(__('settings.cleanedPartial', { ok: total, fail: removed.failed.length }))
+          }
+        } catch (reason) {
+          setError(reason?.message ?? String(reason))
+        }
+        setPruning(false)
+      }, [pruning, __])
+
+      if (!open) return null
+
+      const binOff = !settingsValue('useRecycleBin')
+      // "Unknown" (a failed count) reads as the explanation alone; a known zero
+      // says so in words rather than as "0 of 0".
+      const cleanupDirs = cleanup === null ? 0 : cleanup.dirs.length
+      const cleanupGroups = cleanup === null ? 0 : cleanup.workspaces.length
+      const cleanupSummary = cleanup === null
+        ? ''
+        : cleanupGroups === 0
+          ? (cleanupDirs === 0 ? __('settings.cleanupNone') : __('settings.cleanupCountDirs', { n: cleanupDirs }))
+          : (cleanupDirs === 0
+              ? __('settings.cleanupCountWorkspaces', { n: cleanupGroups })
+              : __('settings.cleanupCount', { dirs: cleanupDirs, workspaces: cleanupGroups }))
+      const cleanupOff = cleanup === null || (cleanupDirs === 0 && cleanupGroups === 0)
+
+      return React.createElement(Modal, {
+        open: true,
+        onClose: closeConfigDialog,
+        title: __('settings.configTitle'),
+        closeLabel: __('settings.close'),
+        description: __('settings.configDesc'),
+        footer: [React.createElement('button', {
+          key: 'close', type: 'button', style: confirmBtnStyle, onClick: closeConfigDialog,
+        }, __('settings.close'))],
+      }, [
+        React.createElement('div', {
+          key: 'h', style: { ...settingLabelStyle, fontWeight: 600, marginBottom: 2 },
+        }, __('settings.behaviour')),
+        React.createElement(SettingRow, {
+          key: 'confirm',
+          label: __('settings.confirmSingleDelete'),
+          hint: __('settings.confirmSingleDeleteHint'),
+          checked: settingsValue('confirmSingleDelete'),
+          onChange: (value) => updateSetting('confirmSingleDelete', value),
+        }),
+        React.createElement(SettingRow, {
+          key: 'prune',
+          label: __('settings.autoPrune'),
+          hint: __('settings.autoPruneHint'),
+          checked: settingsValue('autoPruneEmpty'),
+          onChange: (value) => updateSetting('autoPruneEmpty', value),
+        }),
+        React.createElement(SettingRow, {
+          key: 'bin',
+          label: __('settings.useRecycleBin'),
+          hint: __('settings.useRecycleBinHint'),
+          checked: settingsValue('useRecycleBin'),
+          onChange: (value) => updateSetting('useRecycleBin', value),
+        }),
+        binOff
+          ? React.createElement('div', { key: 'binwarn', style: { ...errStyle, marginTop: 0 } },
+              __('settings.binOffWarning'))
+          : null,
+
+        // Anything the switch did not cover — groups emptied while it was off,
+        // or before it existed — is swept here. The counts are on the row
+        // because the user cannot otherwise tell whether a sweep is worth
+        // pressing, and a disabled button with "nothing empty" next to it says
+        // exactly that.
+        React.createElement('div', { key: 'sep', style: separatorStyle }),
+        React.createElement('div', { key: 'cleanup', style: { ...settingRowStyle, padding: 0 } }, [
+          React.createElement('span', { key: 'text', style: { flex: '1 1 auto', display: 'block' } }, [
+            React.createElement('span', { key: 'label', style: settingLabelStyle }, __('settings.cleanup')),
+            React.createElement('span', { key: 'hint', style: settingHintStyle },
+              cleanupSummary.length === 0
+                ? __('settings.cleanupHint')
+                : `${cleanupSummary}｜${__('settings.cleanupHint')}`),
+          ]),
+          React.createElement('button', {
+            key: 'go',
+            type: 'button',
+            disabled: pruning || cleanupOff,
+            style: pruning || cleanupOff ? ghostBtnOffStyle : ghostBtnStyle,
+            onClick: onCleanup,
+          }, pruning ? __('settings.cleanupRunning') : __('settings.cleanupRun')),
+        ]),
+
+        error ? React.createElement('div', {
+          key: 'err', role: 'alert', style: { ...errStyle, whiteSpace: 'pre-wrap' },
+        }, error) : null,
+      ])
+    }
+
+    /**
+     * The main settings section: the live session list, and the doorway to the
+     * recycle bin.
      *
      * Registered into `settings.section`. The list is the reason this page
      * exists: before it the only way to delete a session was to find its row in
      * the sidebar and open its menu, once per session. Here the whole store is
-     * on screen at once, so a cleanup is tick-tick-tick-delete instead of a
-     * hunt.
+     * on screen at once — paged — so a cleanup is tick-tick-tick-delete instead
+     * of a hunt.
+     *
+     * This page is a list and nothing else. The deletion preferences used to sit
+     * above it, which meant every visit opened on three checkboxes the user had
+     * already answered and pushed the list below the fold; they moved behind the
+     * header's Configure button (`SettingsConfigDialog`), which is one click
+     * away and in the corner the user looks at for page-level controls.
      *
      * The recycle bin used to share this page and now has its own section
      * (`RECYCLE_ID`). The two tasks have nothing in common past the verb — this
@@ -1167,11 +1522,11 @@ window.__ModuleLoader__.load({
       // The recycle count only feeds the doorway button's label, so a failed
       // read leaves it blank instead of raising an error on this page.
       const [recycledCount, setRecycledCount] = useState(null)
-      // Same for the empty-group/empty-folder counts: null means "unknown", not
-      // "zero", so the Clean up button stays disabled until the host has
-      // answered rather than claiming there is nothing to do.
-      const [cleanup, setCleanup] = useState(null)
-      const [pruning, setPruning] = useState(false)
+      // Paging. `page` is zero-based and the slice is derived (`paginate`), so a
+      // filter or a deletion that shortens the list can never strand the panel
+      // on an empty page it has no way back from.
+      const [page, setPage] = useState(0)
+      const [pageSize, setPageSize] = useState(() => readPageSize())
 
       useEffect(() => settingsSubscribe(() => forceRender(n => n + 1)), [])
 
@@ -1199,12 +1554,10 @@ window.__ModuleLoader__.load({
         } catch (reason) {
           setError(reason?.message ?? String(reason))
         }
-        // Every deletion can leave a group and a folder empty, so the counts are
-        // re-read on the same pass instead of in a second effect that would
-        // drift out of step with the list they describe.
-        fetchCleanup()
-          .then(counts => setCleanup(counts))
-          .catch(() => setCleanup(null))
+        // The empty-group/empty-folder counts are NOT read here: they belong to
+        // the Configure dialog, which fetches them when it opens. Carrying them
+        // on this page meant a second unrelated request on every refresh, for a
+        // number the page no longer shows.
         if (!quiet) setLoading(false)
       }, [])
 
@@ -1227,20 +1580,32 @@ window.__ModuleLoader__.load({
             || String(row.sessionId || '').toLowerCase().includes(needle)
           ))
 
-      const visiblePicked = visible.filter(row => picked.has(row.sessionId)).length
-      const allVisiblePicked = visible.length > 0 && visiblePicked === visible.length
+      const { rows: pageRows, page: safePage, pageCount } = paginate(visible, page, pageSize)
+      const pagePicked = pageRows.filter(row => picked.has(row.sessionId)).length
+      const allPagePicked = pageRows.length > 0 && pagePicked === pageRows.length
 
+      // Select acts on the page, not on the filter: with 400 sessions behind a
+      // filter, "select all" that reached off-screen would hand the delete
+      // button ids the user never saw.
       const toggleAllVisible = useCallback(() => {
         setPicked((prev) => {
           const next = new Set(prev)
-          if (visible.every(row => next.has(row.sessionId))) {
-            for (const row of visible) next.delete(row.sessionId)
+          if (pageRows.every(row => next.has(row.sessionId))) {
+            for (const row of pageRows) next.delete(row.sessionId)
           } else {
-            for (const row of visible) next.add(row.sessionId)
+            for (const row of pageRows) next.add(row.sessionId)
           }
           return next
         })
-      }, [visible])
+      }, [pageRows])
+
+      const onPageSize = useCallback((size) => {
+        setPageSize(size)
+        writePageSize(size)
+        // Row 51 is not row 51 any more: start over rather than land somewhere
+        // arbitrary in the re-sliced list.
+        setPage(0)
+      }, [])
 
       const togglePick = useCallback((sessionId) => {
         setPicked((prev) => {
@@ -1307,34 +1672,12 @@ window.__ModuleLoader__.load({
       }, [picked, refresh, __])
 
       /**
-       * Sweep the groups and the store folders a cleanup left empty.
+       * Open the preferences dialog (overlay slot, module-level state).
        *
-       * Host-side and idempotent: a folder goes only when it is actually empty
-       * and a group only when it has no session left, so pressing it twice is
-       * the same as pressing it once.
+       * The button is on this page; the dialog is not, so that it can paint over
+       * the settings modal instead of inside it.
        */
-      const onCleanup = useCallback(async () => {
-        if (pruning) return
-        setPruning(true)
-        setError(null)
-        try {
-          const removed = await pruneEmpty()
-          setCleanup(await fetchCleanup())
-          const total = removed.dirs.length + removed.workspaces.length
-          showToast(
-            total > 0
-              ? __('settings.cleaned', { dirs: removed.dirs.length, workspaces: removed.workspaces.length })
-              : __('settings.cleanupNothing'),
-            'success',
-          )
-          if (removed.failed.length > 0) {
-            setError(__('settings.cleanedPartial', { ok: total, fail: removed.failed.length }))
-          }
-        } catch (reason) {
-          setError(reason?.message ?? String(reason))
-        }
-        setPruning(false)
-      }, [pruning, __])
+      const onOpenConfig = useCallback(() => { openConfigDialog() }, [])
 
       const onOpenRecycle = useCallback(() => {
         // The shell's own action first; a build that renamed it still works
@@ -1344,74 +1687,31 @@ window.__ModuleLoader__.load({
       }, [__])
 
       const headingStyle = { fontSize: 13, fontWeight: 600, margin: '14px 0 2px' }
+      const sectionTitleStyle = { fontSize: 13, fontWeight: 600 }
       const hintStyle = { ...metaStyle, margin: '0 0 8px' }
       const binOff = !settingsValue('useRecycleBin')
       const deleteIds = [...picked]
-      // "Unknown" (a failed count) reads as the explanation alone; a known zero
-      // says so in words rather than as "0 of 0".
-      const cleanupDirs = cleanup === null ? 0 : cleanup.dirs.length
-      const cleanupGroups = cleanup === null ? 0 : cleanup.workspaces.length
-      const cleanupSummary = cleanup === null
-        ? ''
-        : cleanupGroups === 0
-          ? (cleanupDirs === 0 ? __('settings.cleanupNone') : __('settings.cleanupCountDirs', { n: cleanupDirs }))
-          : (cleanupDirs === 0
-              ? __('settings.cleanupCountWorkspaces', { n: cleanupGroups })
-              : __('settings.cleanupCount', { dirs: cleanupDirs, workspaces: cleanupGroups }))
-      const cleanupOff = cleanup === null || (cleanupDirs === 0 && cleanupGroups === 0)
 
       return React.createElement('div', { style: { padding: '4px 0 8px' } }, [
-        React.createElement('div', { key: 'h1', style: headingStyle }, __('settings.behaviour')),
-        React.createElement(SettingRow, {
-          key: 'confirm',
-          label: __('settings.confirmSingleDelete'),
-          hint: __('settings.confirmSingleDeleteHint'),
-          checked: settingsValue('confirmSingleDelete'),
-          onChange: (value) => updateSetting('confirmSingleDelete', value),
-        }),
-        React.createElement(SettingRow, {
-          key: 'prune',
-          label: __('settings.autoPrune'),
-          hint: __('settings.autoPruneHint'),
-          checked: settingsValue('autoPruneEmpty'),
-          onChange: (value) => updateSetting('autoPruneEmpty', value),
-        }),
-        React.createElement(SettingRow, {
-          key: 'bin',
-          label: __('settings.useRecycleBin'),
-          hint: __('settings.useRecycleBinHint'),
-          checked: settingsValue('useRecycleBin'),
-          onChange: (value) => updateSetting('useRecycleBin', value),
-        }),
-        binOff
-          ? React.createElement('div', { key: 'binwarn', style: { ...errStyle, marginTop: 6 } },
-              __('settings.binOffWarning'))
-          : null,
-
-        // Anything the switch did not cover — groups emptied while it was off,
-        // or before it existed — is swept here. The counts are on the row
-        // because the user cannot otherwise tell whether a sweep is worth
-        // pressing, and a disabled button with "nothing empty" next to it says
-        // exactly that.
-        React.createElement('div', { key: 'cleanup', style: settingRowStyle }, [
-          React.createElement('span', { key: 'text', style: { flex: '1 1 auto', display: 'block' } }, [
-            React.createElement('span', { key: 'label', style: settingLabelStyle }, __('settings.cleanup')),
-            React.createElement('span', { key: 'hint', style: settingHintStyle },
-              cleanupSummary.length === 0
-                ? __('settings.cleanupHint')
-                : `${cleanupSummary}｜${__('settings.cleanupHint')}`),
+        // Header: what this page is, and the one button that leaves it. The
+        // preferences it opens are a separate surface, so the page itself holds
+        // nothing but the list.
+        React.createElement('div', {
+          key: 'h2',
+          style: { display: 'flex', alignItems: 'flex-start', gap: 10 },
+        }, [
+          React.createElement('div', { key: 'title', style: { flex: '1 1 auto', minWidth: 0 } }, [
+            React.createElement('div', { key: 't', style: sectionTitleStyle }, __('settings.sessions')),
+            React.createElement('div', { key: 'h', style: { ...metaStyle, margin: '2px 0 0' } },
+              __('settings.sessionsHint')),
           ]),
           React.createElement('button', {
-            key: 'go',
+            key: 'config',
             type: 'button',
-            disabled: pruning || cleanupOff,
-            style: pruning || cleanupOff ? ghostBtnOffStyle : ghostBtnStyle,
-            onClick: onCleanup,
-          }, pruning ? __('settings.cleanupRunning') : __('settings.cleanupRun')),
+            style: { ...ghostBtnStyle, flex: 'none' },
+            onClick: onOpenConfig,
+          }, __('settings.config')),
         ]),
-
-        React.createElement('div', { key: 'h2', style: headingStyle }, __('settings.sessions')),
-        React.createElement('div', { key: 'shint', style: hintStyle }, __('settings.sessionsHint')),
 
         // Toolbar: filter, select helpers, refresh, and the one destructive verb.
         React.createElement('div', { key: 'bar', style: toolbarStyle }, [
@@ -1420,17 +1720,19 @@ window.__ModuleLoader__.load({
             type: 'text',
             value: filter,
             placeholder: __('settings.filter'),
-            onChange: (event) => setFilter(event.target.value),
+            // A filter is a new list: page 1 is where the user expects to be,
+            // not page 4 of the previous one.
+            onChange: (event) => { setFilter(event.target.value); setPage(0) },
             style: filterInputStyle,
             'aria-label': __('settings.filter'),
           }),
           React.createElement('button', {
             key: 'all',
             type: 'button',
-            style: visible.length === 0 ? ghostBtnOffStyle : ghostBtnStyle,
-            disabled: visible.length === 0,
+            style: pageRows.length === 0 ? ghostBtnOffStyle : ghostBtnStyle,
+            disabled: pageRows.length === 0,
             onClick: toggleAllVisible,
-          }, allVisiblePicked ? __('settings.selectNone') : __('settings.selectAll')),
+          }, allPagePicked ? __('settings.selectNone') : __('settings.selectAll')),
           React.createElement('button', {
             key: 'refresh',
             type: 'button',
@@ -1438,6 +1740,14 @@ window.__ModuleLoader__.load({
             disabled: loading || busy,
             onClick: () => refresh(),
           }, __('settings.refresh')),
+          React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
+          // Ticks survive a page turn, so the count is the only thing that says
+          // how much the delete button is about to remove.
+          deleteIds.length > 0
+            ? React.createElement('span', {
+                key: 'picked', style: { ...metaStyle, margin: 0 },
+              }, __('batch.selected', { n: deleteIds.length }))
+            : null,
           React.createElement('button', {
             key: 'delete',
             type: 'button',
@@ -1446,9 +1756,6 @@ window.__ModuleLoader__.load({
             onClick: () => setConfirming(true),
           }, busy ? __('settings.deleting') : __('settings.deletePicked')),
         ]),
-
-        React.createElement('div', { key: 'count', style: { ...metaStyle, margin: '2px 0 0' } },
-          __('settings.count', { n: sessions.length })),
 
         // Inline confirmation rather than a second modal: the user is already
         // inside one, and a modal on a modal is what makes a settings page feel
@@ -1493,7 +1800,7 @@ window.__ModuleLoader__.load({
             ? React.createElement('div', { key: 'none', style: { ...metaStyle, marginTop: 10 } },
                 sessions.length === 0 ? __('settings.emptySessions') : __('settings.filterEmpty'))
             : React.createElement('div', { key: 'list', style: listBoxStyle },
-                visible.map((session, index) => React.createElement(SessionRow, {
+                pageRows.map((session, index) => React.createElement(SessionRow, {
                   key: session.sessionId,
                   session,
                   border: index > 0,
@@ -1501,6 +1808,21 @@ window.__ModuleLoader__.load({
                   picked: picked.has(session.sessionId),
                   onTogglePick: togglePick,
                 }))),
+
+        // Not rendered while empty: a footer under "nothing to delete" is one
+        // more line of furniture.
+        loading || visible.length === 0
+          ? null
+          : React.createElement(Pager, {
+              key: 'pager',
+              page: safePage,
+              pageCount,
+              total: visible.length,
+              pageSize,
+              onPage: setPage,
+              onPageSize,
+              __,
+            }),
 
         // Doorway to the recycle bin. It is a section of its own; this page only
         // needs to say it exists and how much is waiting there.
@@ -1579,6 +1901,10 @@ window.__ModuleLoader__.load({
       const [filter, setFilter] = useState('')
       const [picked, setPicked] = useState(() => new Set())
       const [busy, setBusy] = useState(false)
+      // Same paging as the session list, and the same local page size: two
+      // pick-lists that page differently would read as two plugins.
+      const [page, setPage] = useState(0)
+      const [pageSize, setPageSize] = useState(() => readPageSize())
 
       /**
        * Re-read the recycle list.
@@ -1730,19 +2056,25 @@ window.__ModuleLoader__.load({
             || String(entry.sessionId || '').toLowerCase().includes(needle)
           ))
 
-      const visiblePicked = visible.filter(entry => picked.has(entry.sessionId)).length
-      const allVisiblePicked = visible.length > 0 && visiblePicked === visible.length
+      const { rows: pageRows, page: safePage, pageCount } = paginate(visible, page, pageSize)
+      const allPagePicked = pageRows.length > 0 && pageRows.every(entry => picked.has(entry.sessionId))
       const toggleAllVisible = useCallback(() => {
         setPicked((prev) => {
           const next = new Set(prev)
-          if (visible.every(entry => next.has(entry.sessionId))) {
-            for (const entry of visible) next.delete(entry.sessionId)
+          if (pageRows.every(entry => next.has(entry.sessionId))) {
+            for (const entry of pageRows) next.delete(entry.sessionId)
           } else {
-            for (const entry of visible) next.add(entry.sessionId)
+            for (const entry of pageRows) next.add(entry.sessionId)
           }
           return next
         })
-      }, [visible])
+      }, [pageRows])
+
+      const onPageSize = useCallback((size) => {
+        setPageSize(size)
+        writePageSize(size)
+        setPage(0)
+      }, [])
 
       const headingStyle = { fontSize: 13, fontWeight: 600, margin: '0 0 4px' }
       const selected = picked.size
@@ -1758,17 +2090,17 @@ window.__ModuleLoader__.load({
             type: 'text',
             value: filter,
             placeholder: __('settings.filter'),
-            onChange: (event) => setFilter(event.target.value),
+            onChange: (event) => { setFilter(event.target.value); setPage(0) },
             style: filterInputStyle,
             'aria-label': __('settings.filter'),
           }),
           React.createElement('button', {
             key: 'all',
             type: 'button',
-            style: visible.length === 0 ? ghostBtnOffStyle : ghostBtnStyle,
-            disabled: visible.length === 0,
+            style: pageRows.length === 0 ? ghostBtnOffStyle : ghostBtnStyle,
+            disabled: pageRows.length === 0,
             onClick: toggleAllVisible,
-          }, allVisiblePicked ? __('settings.selectNone') : __('settings.selectAll')),
+          }, allPagePicked ? __('settings.selectNone') : __('settings.selectAll')),
           React.createElement('span', {
             key: 'count', style: { ...metaStyle, margin: 0 },
           }, __('batch.selected', { n: selected })),
@@ -1803,7 +2135,7 @@ window.__ModuleLoader__.load({
             ? React.createElement('div', { key: 'none', style: { ...metaStyle, marginTop: 10 } },
                 entries.length === 0 ? __('settings.empty') : __('settings.filterEmpty'))
             : React.createElement('div', { key: 'list', style: listBoxStyle },
-                visible.map((entry, index) => React.createElement(RecycleRow, {
+                pageRows.map((entry, index) => React.createElement(RecycleRow, {
                   key: entry.sessionId,
                   entry,
                   border: index > 0,
@@ -1813,6 +2145,19 @@ window.__ModuleLoader__.load({
                   onTogglePick: togglePick,
                   __,
                 }))),
+
+        loading || visible.length === 0
+          ? null
+          : React.createElement(Pager, {
+              key: 'pager',
+              page: safePage,
+              pageCount,
+              total: visible.length,
+              pageSize,
+              onPage: setPage,
+              onPageSize,
+              __,
+            }),
 
         error ? React.createElement('div', {
           key: 'err', role: 'alert', style: { ...errStyle, whiteSpace: 'pre-wrap' },
@@ -2090,6 +2435,16 @@ window.__ModuleLoader__.load({
         order: 100,
         ...(localeSvc ? { locale: NS } : {}),
       }, DeleteDialog))
+
+      // The deletion preferences, opened from the session list's header. On the
+      // overlay rather than inside the panel so it paints over the settings
+      // modal, which is what contains the button that opens it.
+      ctx.slots.inject(OVERLAY_SLOT, () => ctx.slots.register({
+        name: OVERLAY_SLOT,
+        id: CONFIG_ID,
+        order: 110,
+        ...(localeSvc ? { locale: NS } : {}),
+      }, SettingsConfigDialog))
 
       // Two settings pages: the policy plus the session list, and the recycle
       // bin. The order keeps them adjacent in the nav, bin second.

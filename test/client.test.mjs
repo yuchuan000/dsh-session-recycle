@@ -141,7 +141,11 @@ function createRuntime() {
       return node.map((child, index) => expand(child, `${path}.${index}`)).filter(Boolean)
     }
     if (typeof node.type === 'function') {
-      const rendered = renderComponent(node.type, node.props, `${path}<${node.type.name || 'anon'}>`)
+      // React hands a component its children as `props.children`; the stub
+      // primitives (Modal) read exactly that, so dropping them here would make
+      // every dialog in these tests render as null.
+      const props = node.children.length > 0 ? { ...node.props, children: node.children } : node.props
+      const rendered = renderComponent(node.type, props, `${path}<${node.type.name || 'anon'}>`)
       return expand(rendered, `${path}<${node.type.name || 'anon'}>`)
     }
     if (node.type === FRAGMENT) {
@@ -160,12 +164,16 @@ function createRuntime() {
    * Render `fn` and settle: render, run the queued effects, drain microtasks,
    * repeat. Bounded, so a component that renders-then-loads-forever fails the
    * test instead of hanging it.
+   *
+   * `key` names the hook slot the instance owns. Two different top-level
+   * components (the settings panel and the overlay dialog) must not share one,
+   * or their useState slots interleave and each reads the other's values.
    */
-  runtime.render = async (fn, props = {}, passes = 4) => {
+  runtime.render = async (fn, props = {}, passes = 4, key = 'root') => {
     let tree = null
     for (let pass = 0; pass < passes; pass += 1) {
       state.effects.length = 0
-      tree = expand(renderComponent(fn, props, 'root'), 'root')
+      tree = expand(renderComponent(fn, props, key), 'root')
       const pending = state.effects.splice(0)
       for (const run of pending) run()
       await new Promise((resolve) => setImmediate(resolve))
@@ -175,7 +183,7 @@ function createRuntime() {
   }
 
   /** Re-settle after a click, without resetting hook state. */
-  runtime.settle = async (fn, props = {}, passes = 3) => runtime.render(fn, props, passes)
+  runtime.settle = async (fn, props = {}, passes = 3, key = 'root') => runtime.render(fn, props, passes, key)
 
   return runtime
 }
@@ -216,9 +224,9 @@ const filterInput = (tree) => nodes(tree, (node) => node.tag === 'input' && node
 /**
  * The scrollable pick-list box, found by its one distinctive style value.
  *
- * Scoping to it matters: the settings page also carries three preference
- * toggles, which are checkboxes too, so a tree-wide query counts five where the
- * test means the two rows.
+ * Scoping to it matters because checkboxes are not exclusive to the list: the
+ * Configure dialog carries one per preference, so a tree-wide query would count
+ * those too.
  */
 const listBox = (tree) => nodes(tree, (node) => node.props?.style?.maxHeight === 340)[0]
 const boxes = (tree) => {
@@ -229,20 +237,71 @@ const boxes = (tree) => {
 /**
  * The checkbox of the preference row whose text contains `label`.
  *
- * The settings page carries one checkbox per preference, all of them outside
- * the pick-list, so `boxes` cannot find them; matching on the row's own copy is
- * the only way to name the right one.
+ * Preferences live in the Configure dialog, so this is called with that tree —
+ * matching on the row's own copy is the only way to name the right one, since
+ * every row carries an identical input.
  */
 const prefBox = (tree, label) => {
   const row = nodes(tree, (node) => node.tag === 'label' && textOf(node).includes(label))[0]
   return row && nodes(row, (node) => node.tag === 'input' && node.props.type === 'checkbox')[0]
 }
+/**
+ * The page-size selector in a list's footer.
+ *
+ * There is only ever one per page, and it is the only `select` in the tree, so
+ * tag alone names it.
+ */
+const sizeSelect = (tree) => byTag(tree, 'select')[0]
 /** The text of whatever banner the overlay currently holds. */
 const toastText = async (client) => {
   const host = client.slots.find((entry) => entry.options.id === 'session-recycle-toast')
   if (!host) return ''
   return textOf(await client.runtime.render(host.component))
 }
+
+/**
+ * The Configure dialog's tree, rendered the way the overlay slot renders it.
+ *
+ * It is a separate overlay entry driven by module-level state, not part of the
+ * page's tree, so a test has to render it on its own — and with its own hook
+ * slot, or its useState calls would be answered by the page's slots.
+ *
+ * @returns the tree, or null while the dialog is closed (it renders nothing).
+ */
+const configTree = async (client) => {
+  const host = client.slots.find((entry) => entry.options.id === 'session-recycle-config')
+  if (!host) return null
+  return client.runtime.render(host.component, {}, 3, 'config')
+}
+
+/** The page tree of the session-list section. */
+const pageTree = async (client) => {
+  const panel = sectionById(client, 'session-recycle-settings').component
+  return client.runtime.render(panel)
+}
+
+/**
+ * Render the session page, press its Configure button, and return both trees.
+ *
+ * @returns { page, config } — `config` is null when the button did not open a
+ *   dialog, which is exactly what the tests assert against.
+ */
+const openConfig = async (client) => {
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const page = await client.runtime.render(panel)
+  const button = buttonByText(page, '配置')
+  if (!button) return { page, config: null, panel }
+  button.props.onClick()
+  return { page: await client.runtime.settle(panel), config: await configTree(client), panel }
+}
+
+/** `count` sessions with predictable titles, for the pager tests. */
+const manySessions = (count) => Array.from({ length: count }, (_, index) => ({
+  sessionId: `session-${index + 1}`,
+  title: `会话 ${index + 1}`,
+  cwd: 'd:/work/proj',
+  updatedAt: 1791600000000 + index,
+}))
 
 // --- the plugin context ------------------------------------------------------
 
@@ -273,7 +332,15 @@ function makeClient({
   const runtime = createRuntime()
   const primitives = {
     IconTrashOutline16: function IconTrashOutline16() { return null },
-    Modal: function Modal(props) { return props.children ?? null },
+    // Both halves of the real primitive, so a test can click the dialog's own
+    // buttons: the body arrives as props.children and the buttons as
+    // props.footer. The card around them is not what is under test.
+    Modal: function Modal(props) {
+      return runtime.React.createElement('div', { 'data-modal': props.title ?? '' }, [
+        props.children ?? null,
+        props.footer ?? null,
+      ])
+    },
     // Renders the banner's text so a test can read what was announced; the real
     // primitive draws a floating card around the same string.
     Toast: function Toast(props) { return props.text ?? null },
@@ -405,11 +472,12 @@ await check('注册两个设置分区：会话列表 + 回收站', () => {
   assert.equal(main.options.name, 'settings.section')
 })
 
-await check('注册会话头部按钮、删除弹窗与 toast（空工作区询问已并入设置页）', () => {
+await check('注册会话头部按钮、删除弹窗、配置弹窗与 toast（空工作区询问已并入设置页）', () => {
   const client = makeClient()
   const ids = client.slots.map((entry) => entry.options.id)
   assert.ok(ids.includes('session-recycle-header'))
   assert.ok(ids.includes('session-recycle-dialog'))
+  assert.ok(ids.includes('session-recycle-config'), '配置弹窗应当注册在 overlay 槽上')
   assert.ok(ids.includes('session-recycle-toast'))
   assert.ok(!ids.includes('session-recycle-empty-workspace'), '询问弹窗应当随三态策略一起删掉')
 })
@@ -526,6 +594,24 @@ await check('主页面带有会话列表与打开回收站的入口', async () =
   assert.ok(text.includes('回收站：1 条待处理'), `入口应报出待处理条数：${text}`)
   // The recycle list itself must NOT be on this page any more.
   assert.ok(!text.includes('旧会话'), '回收站条目不该出现在主设置页')
+})
+
+await check('主页面只剩列表：设置项收进右上角「配置」按钮', async () => {
+  const client = makeClient({ sessions: SESSIONS })
+  const { page, config } = await openConfig(client)
+  const text = textOf(page)
+  // The page is a list. Every preference lives in the dialog.
+  assert.ok(!text.includes('删除单个会话时先确认'), `页面上不该再有设置项：${text}`)
+  assert.ok(!text.includes('空分组与空目录'), `页面上不该再有清理行：${text}`)
+  assert.equal(prefBox(page, '删除'), undefined, '页面上不该有设置行的复选框')
+  assert.ok(config, '「配置」按钮应当打开配置弹窗')
+  const dialogText = textOf(config)
+  assert.ok(dialogText.includes('删除单个会话时先确认'), `弹窗缺少开关：${dialogText}`)
+  assert.ok(dialogText.includes('删除后自动清理空分组与空目录'), `弹窗缺少开关：${dialogText}`)
+  assert.ok(dialogText.includes('删除时移入回收站'), `弹窗缺少开关：${dialogText}`)
+  assert.ok(dialogText.includes('空分组与空目录'), `弹窗缺少清理行：${dialogText}`)
+  // The dialog is the overlay entry, so its tree is not the page's.
+  assert.ok(!text.includes('删除设置'), '弹窗内容不该落在页面树里')
 })
 
 // --- 4. batch delete ---------------------------------------------------------
@@ -683,36 +769,44 @@ await check('批量删除时，清空的是当前打开的那个会话而不是�
 
 // --- 6b. the empty-sweep switch ----------------------------------------------
 
-await check('「删除后自动清理」是一个复选框，勾上写回 host', async () => {
+await check('「删除后自动清理」是配置弹窗里的复选框，勾上写回 host', async () => {
   const client = makeClient({})
-  const panel = sectionById(client, 'session-recycle-settings').component
-  let tree = await client.runtime.render(panel)
+  const { config } = await openConfig(client)
+  assert.ok(config, '配置按钮没有打开弹窗')
 
-  const box = prefBox(tree, '删除后自动清理空分组与空目录')
-  assert.ok(box, `设置页应当有这一行：${textOf(tree).slice(0, 300)}`)
+  const box = prefBox(config, '删除后自动清理空分组与空目录')
+  assert.ok(box, `配置弹窗应当有这一行：${textOf(config).slice(0, 300)}`)
   assert.equal(box.props.checked, false, '默认不勾选：不替用户删分组')
 
   box.props.onChange({ target: { checked: true } })
-  tree = await client.runtime.settle(panel)
+  const after = await configTree(client)
   const posted = client.calls.filter(call => call.path === '/__session-recycle/settings' && call.method === 'POST')
   assert.deepEqual(posted.map(call => call.body), [{ autoPruneEmpty: true }])
-  assert.equal(prefBox(tree, '删除后自动清理空分组与空目录').props.checked, true, '保存后勾选态应当跟着走')
+  assert.equal(prefBox(after, '删除后自动清理空分组与空目录').props.checked, true, '保存后勾选态应当跟着走')
 })
 
-await check('host 说勾选时面板也勾上', async () => {
+await check('host 说勾选时配置弹窗也勾上', async () => {
   const client = makeClient({ settings: { autoPruneEmpty: true } })
-  const panel = sectionById(client, 'session-recycle-settings').component
-  const tree = await client.runtime.render(panel)
-  assert.equal(prefBox(tree, '删除后自动清理').props.checked, true)
+  const { config } = await openConfig(client)
+  assert.equal(prefBox(config, '删除后自动清理').props.checked, true)
 })
 
 await check('host 只返回旧字段时视为不勾选', async () => {
   // An older host never removed a group silently unless told to, so an unknown
   // shape must read as "off" rather than as a licence to delete.
   const client = makeClient({ settings: { emptyWorkspaceAction: 'ask' } })
-  const panel = sectionById(client, 'session-recycle-settings').component
-  const tree = await client.runtime.render(panel)
-  assert.equal(prefBox(tree, '删除后自动清理').props.checked, false)
+  const { config } = await openConfig(client)
+  assert.equal(prefBox(config, '删除后自动清理').props.checked, false)
+})
+
+await check('配置弹窗关掉后不再渲染', async () => {
+  const client = makeClient({})
+  const { config } = await openConfig(client)
+  assert.ok(config, '应当先能打开')
+  const close = buttonByText(config, '关闭')
+  assert.ok(close, `弹窗应有关闭按钮：${reachable(config)}`)
+  close.props.onClick()
+  assert.equal(await configTree(client), null, '关闭后弹窗应当渲染为空')
 })
 
 await check('开关打开时，删完只报数、不再弹空工作区询问', async () => {
@@ -798,28 +892,28 @@ await check('工作区移除失败时，提示不会被会话失败的文案顶�
 
 // --- 6c. empty groups and empty folders --------------------------------------
 
-await check('空分组与空目录行显示数量并可一键清理', async () => {
+await check('空分组与空目录行在配置弹窗里显示数量并可一键清理', async () => {
   const client = makeClient({
     emptyDirs: ['--d-a--', '--d-b--'],
     emptyGroups: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj' }],
   })
-  const panel = sectionById(client, 'session-recycle-settings').component
-  let tree = await client.runtime.render(panel)
+  const { config } = await openConfig(client)
+  assert.ok(config, '配置按钮没有打开弹窗')
 
   assert.ok(
-    textOf(tree).includes('当前有 2 个空目录、1 个空分组'),
-    `应当同时显示两个数量：${textOf(tree).slice(0, 300)}`,
+    textOf(config).includes('当前有 2 个空目录、1 个空分组'),
+    `应当同时显示两个数量：${textOf(config).slice(0, 300)}`,
   )
-  const clean = buttonExact(tree, '清理')
-  assert.ok(clean, `缺少清理按钮：${reachable(tree)}`)
+  const clean = buttonExact(config, '清理')
+  assert.ok(clean, `缺少清理按钮：${reachable(config)}`)
   assert.equal(clean.props.disabled, false)
 
   await clean.props.onClick()
-  tree = await client.runtime.settle(panel)
+  const after = await configTree(client)
   const posted = client.calls.filter(call => call.path === '/__session-recycle/prune-empty')
   assert.equal(posted.length, 1, '应当只发一次清理请求')
   assert.equal(posted[0].method, 'POST')
-  assert.ok(textOf(tree).includes('没有空分组或空目录'), `清理后应当归零：${textOf(tree).slice(0, 300)}`)
+  assert.ok(textOf(after).includes('没有空分组或空目录'), `清理后应当归零：${textOf(after).slice(0, 300)}`)
   const banner = await toastText(client)
   assert.ok(banner.includes('2 个空目录'), `应当报出清掉的数量：${banner}`)
   assert.ok(banner.includes('1 个空分组'), `应当报出清掉的分组数：${banner}`)
@@ -827,24 +921,156 @@ await check('空分组与空目录行显示数量并可一键清理', async () =
 
 await check('只有空目录时按目录口径报数', async () => {
   const client = makeClient({ emptyDirs: ['--d-a--'] })
-  const panel = sectionById(client, 'session-recycle-settings').component
-  const tree = await client.runtime.render(panel)
-  assert.ok(textOf(tree).includes('当前有 1 个空目录，没有空分组'), textOf(tree).slice(0, 300))
+  const { config } = await openConfig(client)
+  assert.ok(textOf(config).includes('当前有 1 个空目录，没有空分组'), textOf(config).slice(0, 300))
 })
 
 await check('只有空分组时按分组口径报数', async () => {
   const client = makeClient({ emptyGroups: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj' }] })
-  const panel = sectionById(client, 'session-recycle-settings').component
-  const tree = await client.runtime.render(panel)
-  assert.ok(textOf(tree).includes('当前有 1 个空分组，没有空目录'), textOf(tree).slice(0, 300))
+  const { config } = await openConfig(client)
+  assert.ok(textOf(config).includes('当前有 1 个空分组，没有空目录'), textOf(config).slice(0, 300))
 })
 
 await check('都没有时清理按钮禁用', async () => {
   const client = makeClient({})
+  const { config } = await openConfig(client)
+  assert.ok(textOf(config).includes('没有空分组或空目录'))
+  assert.equal(buttonExact(config, '清理').props.disabled, true)
+})
+
+// --- 6d. paging ---------------------------------------------------------------
+
+/**
+ * The titles of the rows currently on screen, in order.
+ *
+ * The row title is the only span inside the list carrying this exact style pair
+ * (the meta line below it is a size smaller), which is enough to name it
+ * without reaching into the component.
+ */
+const rowTitles = (tree) => {
+  const box = listBox(tree)
+  if (!box) return []
+  return nodes(box, (node) => node.props?.style?.fontSize === 13 && node.props?.style?.whiteSpace === 'nowrap')
+    .map(textOf)
+}
+
+const countCalls = (client, path) => client.calls.filter(call => call.path === path).length
+
+await check('会话列表分页：默认每页 50 行，翻页换一批', async () => {
+  const client = makeClient({ sessions: manySessions(60) })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+
+  assert.equal(boxes(tree).length, 50, '默认每页 50 行')
+  assert.equal(rowTitles(tree)[0], '会话 1')
+  assert.ok(textOf(tree).includes('共 60 个会话'), textOf(tree).slice(0, 200))
+  assert.ok(textOf(tree).includes('第 1/2 页'), `缺少页码位置：${textOf(tree).slice(0, 200)}`)
+
+  await buttonByText(tree, '下一页').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(boxes(tree).length, 10, '第二页只剩 10 行')
+  assert.equal(rowTitles(tree)[0], '会话 51', '第二页应当从第 51 行开始')
+  assert.ok(textOf(tree).includes('第 2/2 页'), textOf(tree).slice(0, 200))
+})
+
+await check('页码按钮直达对应页，末页按钮按页数收窄', async () => {
+  const client = makeClient({ sessions: manySessions(120) })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+
+  assert.ok(textOf(tree).includes('第 1/3 页'), textOf(tree).slice(0, 200))
+  /** The page buttons carry exactly the page number as their label. */
+  await buttonExact(tree, '3').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(rowTitles(tree)[0], '会话 101', '直接跳末页')
+  assert.equal(boxes(tree).length, 20, '120 条 → 末页 20 行')
+
+  await buttonByText(tree, '上一页').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(rowTitles(tree)[0], '会话 51')
+})
+
+await check('每页条数可切换，并且回到第一页', async () => {
+  const client = makeClient({ sessions: manySessions(60) })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+
+  await buttonByText(tree, '下一页').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(rowTitles(tree)[0], '会话 51')
+
+  sizeSelect(tree).props.onChange({ target: { value: '20' } })
+  tree = await client.runtime.settle(panel)
+  assert.equal(boxes(tree).length, 20, '每页 20 行')
+  assert.equal(rowTitles(tree)[0], '会话 1', '换页大小后回到第一页')
+  assert.ok(textOf(tree).includes('第 1/3 页'), textOf(tree).slice(0, 200))
+})
+
+await check('全选只作用于当前页，已勾选跨页保留', async () => {
+  const client = makeClient({ sessions: manySessions(60) })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+
+  buttonByText(tree, '全选本页').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(boxes(tree).filter(box => box.props.checked).length, 50, '整页被勾上')
+  assert.ok(textOf(tree).includes('已选 50 条'), `应当报出已选条数：${textOf(tree).slice(0, 300)}`)
+
+  await buttonByText(tree, '下一页').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(boxes(tree).filter(box => box.props.checked).length, 0, '第二页没被连带勾上')
+  assert.ok(textOf(tree).includes('已选 50 条'), '勾选跨页保留，计数不重置')
+})
+
+await check('筛选后回到第一页', async () => {
+  const client = makeClient({ sessions: manySessions(60) })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+
+  await buttonByText(tree, '下一页').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(rowTitles(tree)[0], '会话 51')
+
+  filterInput(tree).props.onChange({ target: { value: '会话 1' } })
+  tree = await client.runtime.settle(panel)
+  // 会话 1 / 10 … 19 — eleven rows, one page.
+  assert.equal(boxes(tree).length, 11, `筛选结果应为 11 行：${textOf(tree).slice(0, 200)}`)
+  assert.equal(rowTitles(tree)[0], '会话 1', '筛选后应当从第一页开始')
+})
+
+await check('空列表不渲染分页器', async () => {
+  const client = makeClient({ sessions: [] })
   const panel = sectionById(client, 'session-recycle-settings').component
   const tree = await client.runtime.render(panel)
-  assert.ok(textOf(tree).includes('没有空分组或空目录'))
-  assert.equal(buttonExact(tree, '清理').props.disabled, true)
+  assert.ok(textOf(tree).includes('没有可删除的会话'))
+  assert.equal(sizeSelect(tree), undefined, '没有行时不该有分页器')
+})
+
+await check('回收站列表用同一套分页', async () => {
+  const recycled = Array.from({ length: 55 }, (_, index) => ({
+    sessionId: `session-${index + 1}`,
+    title: `旧会话 ${index + 1}`,
+    cwd: 'd:/work/gone',
+    at: 1791400000000 + index,
+    label: `旧会话 ${index + 1}`,
+  }))
+  const client = makeClient({ recycled })
+  const panel = sectionById(client, 'session-recycle-recycled').component
+  let tree = await client.runtime.render(panel)
+  assert.equal(boxes(tree).length, 50)
+  assert.ok(textOf(tree).includes('共 55 个会话'), textOf(tree).slice(0, 200))
+
+  await buttonByText(tree, '下一页').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(boxes(tree).length, 5)
+})
+
+await check('空分组计数只在打开配置弹窗时才去读', async () => {
+  const client = makeClient({})
+  await pageTree(client)
+  assert.equal(countCalls(client, '/__session-recycle/empty-dirs'), 0, '页面上不再需要这份计数')
+  await openConfig(client)
+  assert.equal(countCalls(client, '/__session-recycle/empty-dirs'), 1, '打开配置时读一次')
 })
 
 // --- 7. client/host contract -------------------------------------------------
