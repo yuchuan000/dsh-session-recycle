@@ -22,16 +22,18 @@ window.__ModuleLoader__.load({
     const OVERLAY_SLOT = 'shell.overlay'
     const HEADER_ID = 'session-recycle-header'
     const SETTINGS_ID = 'session-recycle-settings'
-    // The recycle bin is a section of its own so it gets its own nav entry:
-    // restoring is a different task from picking what to delete, and stacking
-    // them on one page made the page long and the two toolbars look alike.
-    const RECYCLE_ID = 'session-recycle-recycled'
     const DIALOG_ID = 'session-recycle-dialog'
     const TOAST_ID = 'session-recycle-toast'
     // The deletion preferences, moved off the page and behind a button. They
     // render from the overlay slot like the confirm dialog, so the panel itself
     // stays a plain list.
     const CONFIG_ID = 'session-recycle-config'
+    // The page's two lists, as tabs on one settings section. They were briefly
+    // two sections — two nav entries inside Settings — which put two nearly
+    // identical toolbars one click apart and made "undo a delete" look like a
+    // different feature from "delete". Same page, one tab strip.
+    const TAB_SESSIONS = 'sessions'
+    const TAB_RECYCLE = 'recycle'
     const EVENT = 'dsh-session-recycle:delete'
 
     // --- locale -----------------------------------------------------------------
@@ -121,11 +123,9 @@ window.__ModuleLoader__.load({
       'settings.deletedManyPartial': '已删除 {ok} 个，{fail} 个失败。',
       'settings.deletedManyPartialPruned': '已删除 {ok} 个，{fail} 个失败，并移除 {m} 个空分组。',
 
-      // 回收站已拆成独立标签页，主页面只留一个入口按钮。
-      'settings.recycleNav': '回收站',
-      'settings.openRecycle': '打开回收站',
-      'settings.recycleCount': '回收站：{n} 条待处理',
-      'settings.recycleEmptyCount': '回收站是空的',
+      // 两个列表是同一页上的两个标签页：标题取列表名，徽标是各自的条数。
+      'settings.tabsLabel': '会话删除页签',
+      'settings.tabCount': '共 {n} 条',
 
       // 分页器（两个列表共用）。
       'settings.pagerPrev': '上一页',
@@ -218,11 +218,10 @@ window.__ModuleLoader__.load({
       'settings.deletedManyPartial': 'Deleted {ok}, {fail} failed.',
       'settings.deletedManyPartialPruned': 'Deleted {ok}, {fail} failed, and removed {m} empty group(s).',
 
-      // The recycle bin is its own tab now; this page only carries the doorway.
-      'settings.recycleNav': 'Recycle bin',
-      'settings.openRecycle': 'Open the recycle bin',
-      'settings.recycleCount': 'Recycle bin: {n} pending',
-      'settings.recycleEmptyCount': 'The recycle bin is empty',
+      // Two lists, two tabs on one page: the title is the list's own name and
+      // the badge is how much each one is holding.
+      'settings.tabsLabel': 'Deletion page tabs',
+      'settings.tabCount': '{n} entries',
 
       // The pager, shared by both pick-lists.
       'settings.pagerPrev': 'Previous',
@@ -239,9 +238,6 @@ window.__ModuleLoader__.load({
     let uiWorkspaceSvc = null
     // The client workspace *list* store, so grouping updates can be pushed in.
     let workspacesSvc = null
-    // This plugin's browser context. Held because one section needs to move the
-    // settings panel to another section, and slot access is a context call.
-    let pluginCtx = null
     // Cleanup for DOM-level wiring that cordis does not own (the sidebar menu
     // observer). Run on dispose so a plugin reload leaves nothing behind.
     const sidebarMenuDisposers = []
@@ -584,58 +580,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Switch the settings panel to one of this plugin's own sections.
-     *
-     * A `settings.section` entry only receives `close` — the shell owns modal
-     * visibility and navigation, and it exposes no navigation service. The
-     * shell's store, however, is mounted on its own `sidebar.settings` slot
-     * entry (the settings-general package registers it as `store`), and the
-     * shell's `openSection` action lives on the instance that handle creates.
-     * Reaching it through the slot ledger is the supported way in: no DOM, no
-     * private module, and it fails closed (returns false) on a build that
-     * renamed the action, in which case the caller falls back to a nav click.
-     *
-     * @returns whether the panel was asked to switch.
-     */
-    function openSettingsSection(ctx, sectionId) {
-      try {
-        const entries = (typeof ctx?.slots?.entries === 'function' && ctx.slots.entries('sidebar.settings')) || []
-        for (const entry of entries) {
-          const handle = entry?.store
-          if (handle === undefined || handle === null) continue
-          if (typeof handle.create !== 'function') continue
-          const instance = handle.create()
-          const actions = instance && instance.actions
-          if (actions && typeof actions.openSection === 'function') {
-            actions.openSection(sectionId)
-            return true
-          }
-        }
-      } catch { /* fall through to the nav-click fallback */ }
-      return false
-    }
-
-    /**
-     * Last-resort section switch: click the nav cell whose label matches.
-     *
-     * Only reached when the slot-ledger route is unavailable. The nav renders
-     * one button per section, in `order`, and the button's text is exactly the
-     * registered label, so matching on the visible label is stable across the
-     * shell's internals.
-     */
-    function clickSettingsNav(label) {
-      if (typeof document === 'undefined' || typeof label !== 'string' || label.length === 0) return false
-      const panel = document.querySelector('[data-shortcut-modal="settings"]')
-      if (panel === null) return false
-      for (const cell of panel.querySelectorAll('nav button')) {
-        if ((cell.textContent || '').trim() !== label.trim()) continue
-        cell.click()
-        return true
-      }
-      return false
-    }
-
     async function restoreSession(sessionId) {
       return api('/__session-recycle/restore', { method: 'POST', body: { sessionId } })
     }
@@ -936,6 +880,43 @@ window.__ModuleLoader__.load({
       border: '1px solid var(--dsw-alias-interactive-bg-primary, #3b82f6)',
       background: 'var(--dsw-alias-interactive-bg-primary, #3b82f6)',
       color: '#fff', fontSize: 13, cursor: 'pointer',
+    }
+
+    // --- tab strip --------------------------------------------------------------
+    //
+    // One page, two lists, one strip. The selected tab is marked with a rule on
+    // the shared baseline rather than a filled pill: the page below it is dense
+    // already, and a second filled surface would compete with the list itself.
+
+    const tabStripStyle = {
+      display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8,
+      paddingBottom: 0,
+      borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
+    }
+    const tabListStyle = {
+      display: 'flex', alignItems: 'center', gap: 2,
+      flex: '1 1 auto', minWidth: 0,
+    }
+    const tabBaseStyle = {
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      padding: '6px 10px', marginBottom: -1, borderRadius: '6px 6px 0 0',
+      border: 'none', borderBottom: '2px solid transparent',
+      background: 'transparent', cursor: 'pointer',
+      fontSize: 13, lineHeight: '20px',
+      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+    }
+    /** The open tab: same shape as the idle one, marked rather than disabled. */
+    const tabOnStyle = {
+      ...tabBaseStyle, fontWeight: 600,
+      color: 'var(--dsw-alias-label-primary, inherit)',
+      borderBottomColor: 'var(--dsw-alias-interactive-bg-primary, #3b82f6)',
+    }
+    /** How much a list is holding — quiet, so it does not outrank the label. */
+    const tabBadgeStyle = {
+      display: 'inline-block', padding: '0 6px', borderRadius: 8,
+      fontSize: 11, lineHeight: '16px',
+      background: 'var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
+      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
     }
 
     // --- pick-list styles -------------------------------------------------------
@@ -1487,29 +1468,163 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The main settings section: the live session list, and the doorway to the
+     * The settings section: one page, two tabs — the session list and the
      * recycle bin.
      *
-     * Registered into `settings.section`. The list is the reason this page
-     * exists: before it the only way to delete a session was to find its row in
-     * the sidebar and open its menu, once per session. Here the whole store is
-     * on screen at once — paged — so a cleanup is tick-tick-tick-delete instead
-     * of a hunt.
+     * Registered into `settings.section`. The session list is the reason this
+     * page exists: before it the only way to delete a session was to find its
+     * row in the sidebar and open its menu, once per session. Here the whole
+     * store is on screen at once — paged — so a cleanup is
+     * tick-tick-tick-delete instead of a hunt.
      *
-     * This page is a list and nothing else. The deletion preferences used to sit
-     * above it, which meant every visit opened on three checkboxes the user had
-     * already answered and pushed the list below the fold; they moved behind the
-     * header's Configure button (`SettingsConfigDialog`), which is one click
-     * away and in the corner the user looks at for page-level controls.
+     * The two lists were briefly two separate settings sections. That gave each
+     * one its own nav entry, which read as two features, cost a click to cross,
+     * and hid how much was waiting in the bin from the list you delete from. A
+     * tab strip is the right size for the distinction: same page, same toolbar
+     * vocabulary, one click to cross.
      *
-     * The recycle bin used to share this page and now has its own section
-     * (`RECYCLE_ID`). The two tasks have nothing in common past the verb — this
-     * page is about choosing what to remove, that one about undoing a removal —
-     * and stacking them produced two nearly identical toolbars on one page,
-     * which is a good way to press the wrong one.
+     * Both panes, once visited, stay mounted and the inactive one is hidden with
+     * `display: none` rather than unmounted. Two reasons: ticks survive a peek
+     * into the bin and back (the whole point of ticking across pages), and the
+     * second list is not re-fetched every time the user flicks between tabs. A
+     * tab that has never been opened is not mounted at all, so opening the page
+     * still costs one request.
+     *
+     * Everything that is a *policy* — the deletion prefs, the recycle-bin
+     * switch, the empty-group sweep — lives behind the Configure button in this
+     * strip, not in either pane: those settings govern both lists, and a control
+     * that comes and goes with the tab is a control the user has to hunt for.
      */
     function SettingsPanel(props) {
       const __ = (props && props.t) || t
+      useLocaleRevision()
+      const [tab, setTab] = useState(TAB_SESSIONS)
+      // Which panes have been opened at least once. `Set` because it is only
+      // ever added to: going back to a tab must not unload the other one.
+      const [mounted, setMounted] = useState(() => new Set([TAB_SESSIONS]))
+      // Row counts per tab, reported up by the panes. Absent until a pane has
+      // read its list, which is why the badge renders nothing rather than 0.
+      const [counts, setCounts] = useState({})
+
+      const onTab = useCallback((id) => {
+        setTab(id)
+        setMounted((prev) => (prev.has(id) ? prev : new Set(prev).add(id)))
+      }, [])
+
+      // Stable identity: the panes call this from an effect keyed on its
+      // identity, so a fresh function per render would re-run it forever.
+      const onCount = useCallback((id, n) => {
+        setCounts((prev) => (prev[id] === n ? prev : { ...prev, [id]: n }))
+      }, [])
+
+      const onOpenConfig = useCallback(() => { openConfigDialog() }, [])
+
+      // One bound reporter per tab, created unconditionally: a hook called from
+      // inside the render map below would change the hook order the moment a
+      // pane is filtered out of it.
+      const reportSessions = useCountReporter(TAB_SESSIONS, onCount)
+      const reportRecycle = useCountReporter(TAB_RECYCLE, onCount)
+      const panes = [
+        { id: TAB_SESSIONS, pane: SessionsPane, onCount: reportSessions },
+        { id: TAB_RECYCLE, pane: RecyclePane, onCount: reportRecycle },
+      ]
+
+      return React.createElement('div', { style: { padding: '4px 0 8px' } }, [
+        React.createElement(SettingsTabs, {
+          key: 'tabs',
+          tab,
+          counts,
+          onTab,
+          onOpenConfig,
+          __,
+        }),
+        // Inactive panes stay in the tree, hidden: see the note above. State is
+        // kept by `display: none` rather than by lifting it, so a pane that has
+        // never been visited still costs nothing.
+        ...panes
+          .filter(entry => mounted.has(entry.id))
+          .map(entry => React.createElement('div', {
+            key: entry.id,
+            'data-pane': entry.id,
+            style: { display: tab === entry.id ? undefined : 'none' },
+          }, React.createElement(entry.pane, {
+            onCount: entry.onCount,
+            __,
+          }))),
+      ])
+    }
+
+    /**
+     * Bind a pane's count callback to its own tab id.
+     *
+     * A plain closure would be a new function on every parent render, and the
+     * pane reports from an effect keyed on the callback — so the pane would
+     * report, the parent would re-render, the callback would change, and the
+     * pair would spin. This is still a closure, but a `useCallback` that only
+     * depends on the (stable) reporter and the id, so the identity holds.
+     */
+    function useCountReporter(id, report) {
+      return useCallback((n) => report(id, n), [id, report])
+    }
+
+    /**
+     * The page's tab strip: one tab per list, plus the Configure button.
+     *
+     * The badge says how much each list is holding — the one number that
+     * decides whether crossing over is worth a click.
+     */
+    function SettingsTabs(props) {
+      const __ = props.__ || t
+      const tabs = [
+        { id: TAB_SESSIONS, label: __('settings.sessions') },
+        { id: TAB_RECYCLE, label: __('settings.recycle') },
+      ]
+      return React.createElement('div', { style: tabStripStyle }, [
+        React.createElement('div', {
+          key: 'list',
+          role: 'tablist',
+          'aria-label': __('settings.tabsLabel'),
+          style: tabListStyle,
+        }, tabs.map(tab => {
+          const count = props.counts?.[tab.id]
+          const on = props.tab === tab.id
+          return React.createElement('button', {
+            key: tab.id,
+            type: 'button',
+            role: 'tab',
+            'data-tab': tab.id,
+            'aria-selected': on,
+            style: on ? tabOnStyle : tabBaseStyle,
+            onClick: () => props.onTab?.(tab.id),
+          }, [
+            React.createElement('span', { key: 'l' }, tab.label),
+            // Missing until the pane has a number to give: a badge reading "0"
+            // during the first load would be a claim the client cannot make yet.
+            typeof count === 'number'
+              ? React.createElement('span', {
+                  key: 'n', style: tabBadgeStyle, title: __('settings.tabCount', { n: count }),
+                }, String(count))
+              : null,
+          ])
+        })),
+        React.createElement('button', {
+          key: 'config',
+          type: 'button',
+          style: { ...ghostBtnStyle, flex: 'none' },
+          onClick: () => props.onOpenConfig?.(),
+        }, __('settings.config')),
+      ])
+    }
+
+    /**
+     * The session list: tick rows, delete them in one batch.
+     *
+     * A pane of `SettingsPanel`, not a page of its own — it is handed a
+     * `onCount` callback to report its row count up to the tab strip and owns
+     * nothing else about the page.
+     */
+    function SessionsPane(props) {
+      const __ = props.__ || t
       useLocaleRevision()
       const [, forceRender] = useState(0)
       const [sessions, setSessions] = useState([])
@@ -1519,9 +1634,6 @@ window.__ModuleLoader__.load({
       const [picked, setPicked] = useState(() => new Set())
       const [confirming, setConfirming] = useState(false)
       const [busy, setBusy] = useState(false)
-      // The recycle count only feeds the doorway button's label, so a failed
-      // read leaves it blank instead of raising an error on this page.
-      const [recycledCount, setRecycledCount] = useState(null)
       // Paging. `page` is zero-based and the slice is derived (`paginate`), so a
       // filter or a deletion that shortens the list can never strand the panel
       // on an empty page it has no way back from.
@@ -1529,6 +1641,18 @@ window.__ModuleLoader__.load({
       const [pageSize, setPageSize] = useState(() => readPageSize())
 
       useEffect(() => settingsSubscribe(() => forceRender(n => n + 1)), [])
+
+      // The tab badge. Reported from an effect keyed on the number and the
+      // callback, not during render: the parent owns the value being written, so
+      // writing it mid-render would be a render-time update of another
+      // component's state. Nothing is reported until the first read lands, so
+      // the badge cannot flash a "0" it is about to contradict; a later refresh
+      // leaves the last known number up while it runs.
+      const onCount = props.onCount
+      useEffect(() => {
+        if (loading) return
+        onCount?.(sessions.length)
+      }, [onCount, loading, sessions.length])
 
       /**
        * Re-read the store's session list.
@@ -1562,14 +1686,6 @@ window.__ModuleLoader__.load({
       }, [])
 
       useEffect(() => { refresh() }, [refresh])
-
-      useEffect(() => {
-        let cancelled = false
-        fetchRecycled()
-          .then((rows) => { if (!cancelled) setRecycledCount(rows.length) })
-          .catch(() => { if (!cancelled) setRecycledCount(null) })
-        return () => { cancelled = true }
-      }, [])
 
       const needle = filter.trim().toLowerCase()
       const visible = needle.length === 0
@@ -1671,47 +1787,20 @@ window.__ModuleLoader__.load({
         setBusy(false)
       }, [picked, refresh, __])
 
-      /**
-       * Open the preferences dialog (overlay slot, module-level state).
-       *
-       * The button is on this page; the dialog is not, so that it can paint over
-       * the settings modal instead of inside it.
-       */
-      const onOpenConfig = useCallback(() => { openConfigDialog() }, [])
+      // The Configure button that opens the preferences dialog lives in the tab
+      // strip (`SettingsTabs`), not in this pane: the bin switch it holds
+      // governs the other tab too.
 
-      const onOpenRecycle = useCallback(() => {
-        // The shell's own action first; a build that renamed it still works
-        // through the nav click.
-        if (openSettingsSection(pluginCtx, RECYCLE_ID)) return
-        clickSettingsNav(__('settings.recycleNav'))
-      }, [__])
-
-      const headingStyle = { fontSize: 13, fontWeight: 600, margin: '14px 0 2px' }
-      const sectionTitleStyle = { fontSize: 13, fontWeight: 600 }
       const hintStyle = { ...metaStyle, margin: '0 0 8px' }
       const binOff = !settingsValue('useRecycleBin')
       const deleteIds = [...picked]
 
-      return React.createElement('div', { style: { padding: '4px 0 8px' } }, [
-        // Header: what this page is, and the one button that leaves it. The
-        // preferences it opens are a separate surface, so the page itself holds
-        // nothing but the list.
-        React.createElement('div', {
-          key: 'h2',
-          style: { display: 'flex', alignItems: 'flex-start', gap: 10 },
-        }, [
-          React.createElement('div', { key: 'title', style: { flex: '1 1 auto', minWidth: 0 } }, [
-            React.createElement('div', { key: 't', style: sectionTitleStyle }, __('settings.sessions')),
-            React.createElement('div', { key: 'h', style: { ...metaStyle, margin: '2px 0 0' } },
-              __('settings.sessionsHint')),
-          ]),
-          React.createElement('button', {
-            key: 'config',
-            type: 'button',
-            style: { ...ghostBtnStyle, flex: 'none' },
-            onClick: onOpenConfig,
-          }, __('settings.config')),
-        ]),
+      return React.createElement('div', null, [
+        // No heading: the tab right above this line carries the name, and a
+        // title that repeats the tab it sits under is just one more line of
+        // furniture between the user and the first row.
+        React.createElement('div', { key: 'h', style: { ...hintStyle, paddingTop: 8 } },
+          __('settings.sessionsHint')),
 
         // Toolbar: filter, select helpers, refresh, and the one destructive verb.
         React.createElement('div', { key: 'bar', style: toolbarStyle }, [
@@ -1824,22 +1913,8 @@ window.__ModuleLoader__.load({
               __,
             }),
 
-        // Doorway to the recycle bin. It is a section of its own; this page only
-        // needs to say it exists and how much is waiting there.
-        React.createElement('div', { key: 'h3', style: headingStyle }, __('settings.recycle')),
-        React.createElement('div', { key: 'rrow', style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } }, [
-          React.createElement('button', {
-            key: 'open', type: 'button', style: ghostBtnStyle, onClick: onOpenRecycle,
-          }, __('settings.openRecycle')),
-          React.createElement('span', {
-            key: 'n', style: { ...metaStyle, margin: 0 },
-          }, recycledCount === null
-            ? ''
-            : recycledCount === 0
-              ? __('settings.recycleEmptyCount')
-              : __('settings.recycleCount', { n: recycledCount })),
-        ]),
-
+        // No doorway to the bin down here any more: it is one tab away, with
+        // its own count on the tab, instead of a button the user had to notice.
         error ? React.createElement('div', {
           key: 'err', role: 'alert', style: { ...errStyle, whiteSpace: 'pre-wrap' },
         }, error) : null,
@@ -1884,15 +1959,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The recycle bin, as its own settings section.
+     * The recycle bin: the second tab of the same settings page.
      *
      * Same pick-list shape as the session list: tick rows, then restore or purge
      * them. Entries are sessions this plugin deleted and still holds payloads
      * for; an entry whose payload went missing is listed anyway, because a row
      * that cannot be restored is better news than one that silently vanished.
      */
-    function RecyclePanel(props) {
-      const __ = (props && props.t) || t
+    function RecyclePane(props) {
+      const __ = props.__ || t
       useLocaleRevision()
       const [entries, setEntries] = useState([])
       const [loading, setLoading] = useState(true)
@@ -1905,6 +1980,13 @@ window.__ModuleLoader__.load({
       // pick-lists that page differently would read as two plugins.
       const [page, setPage] = useState(0)
       const [pageSize, setPageSize] = useState(() => readPageSize())
+
+      // The tab badge, same contract as the session list's.
+      const onCount = props.onCount
+      useEffect(() => {
+        if (loading) return
+        onCount?.(entries.length)
+      }, [onCount, loading, entries.length])
 
       /**
        * Re-read the recycle list.
@@ -2076,12 +2158,12 @@ window.__ModuleLoader__.load({
         setPage(0)
       }, [])
 
-      const headingStyle = { fontSize: 13, fontWeight: 600, margin: '0 0 4px' }
       const selected = picked.size
 
-      return React.createElement('div', { style: { padding: '4px 0 8px' } }, [
-        React.createElement('div', { key: 'h', style: headingStyle }, __('settings.recycle')),
-        React.createElement('div', { key: 'hint', style: { ...metaStyle, margin: '0 0 8px' } },
+      return React.createElement('div', null, [
+        // The bin's own hint sits where the session list's does; the tab above
+        // already carries the name, so neither pane repeats its title here.
+        React.createElement('div', { key: 'hint', style: { ...metaStyle, margin: '0 0 8px', paddingTop: 8 } },
           __('settings.recycleHint')),
 
         React.createElement('div', { key: 'bar', style: toolbarStyle }, [
@@ -2393,7 +2475,6 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
-      pluginCtx = ctx
       sessionsSvc = ctx.get('sessions')
       if (!sessionsSvc) ctx.inject(['sessions'], (sub) => { sessionsSvc = sub.sessions })
 
@@ -2446,8 +2527,9 @@ window.__ModuleLoader__.load({
         ...(localeSvc ? { locale: NS } : {}),
       }, SettingsConfigDialog))
 
-      // Two settings pages: the policy plus the session list, and the recycle
-      // bin. The order keeps them adjacent in the nav, bin second.
+      // One settings page for both lists — the session list and the recycle bin
+      // are tabs inside it, not two nav entries. `SettingsPanel` is the shell
+      // that paints the strip and mounts whichever pane has been opened.
       ctx.slots.inject(SETTINGS_SLOT, () => ctx.slots.register({
         name: SETTINGS_SLOT,
         id: SETTINGS_ID,
@@ -2455,14 +2537,6 @@ window.__ModuleLoader__.load({
         label: () => t('settings.nav'),
         ...(localeSvc ? { locale: NS } : {}),
       }, SettingsPanel))
-
-      ctx.slots.inject(SETTINGS_SLOT, () => ctx.slots.register({
-        name: SETTINGS_SLOT,
-        id: RECYCLE_ID,
-        order: 62,
-        label: () => t('settings.recycleNav'),
-        ...(localeSvc ? { locale: NS } : {}),
-      }, RecyclePanel))
 
       // Transient banners. Registered on the overlay (a portalled surface), so
       // a restore reported from the settings page still shows top-center over

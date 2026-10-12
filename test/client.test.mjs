@@ -295,6 +295,40 @@ const openConfig = async (client) => {
   return { page: await client.runtime.settle(panel), config: await configTree(client), panel }
 }
 
+/** The settings section's component, whatever it currently renders. */
+const panelOf = (client) => sectionById(client, 'session-recycle-settings').component
+
+/**
+ * One of the page's two panes, by its marker.
+ *
+ * Both panes stay in the tree once visited — the inactive one is hidden, not
+ * unmounted — so a bare tree-wide query would count the other list's rows too.
+ * Every assertion about one list is therefore scoped through this.
+ */
+const paneOf = (tree, name) => nodes(tree, (node) => node.props?.['data-pane'] === name)[0]
+
+/** The tab button, matched on its marker rather than on its label. */
+const tabButton = (tree, name) => nodes(tree, (node) => node.props?.['data-tab'] === name)[0]
+
+/**
+ * Render the page with one of its tabs open.
+ *
+ * @param name - 'sessions' (the default tab) or 'recycle'.
+ */
+const tabTree = async (client, name = 'sessions') => {
+  const panel = panelOf(client)
+  const tree = await client.runtime.render(panel)
+  if (name === 'sessions') return tree
+  tabButton(tree, name).props.onClick()
+  return client.runtime.settle(panel)
+}
+
+/** The recycle tab's pane, with its tab open and the tree scoped to it. */
+const binPane = async (client) => paneOf(await tabTree(client, 'recycle'), 'recycle')
+
+/** How many calls a client made to one route. */
+const countCalls = (client, path) => client.calls.filter(call => call.path === path).length
+
 /** `count` sessions with predictable titles, for the pager tests. */
 const manySessions = (count) => Array.from({ length: count }, (_, index) => ({
   sessionId: `session-${index + 1}`,
@@ -459,17 +493,18 @@ const sectionById = (client, id) => client.slots.find((entry) => entry.options.i
 
 // --- 1. registration ---------------------------------------------------------
 
-await check('注册两个设置分区：会话列表 + 回收站', () => {
+await check('只注册一个设置分区：两个列表是它内部的两个标签页', () => {
   const client = makeClient()
   const main = sectionById(client, 'session-recycle-settings')
-  const bin = sectionById(client, 'session-recycle-recycled')
-  assert.ok(main, '缺少主设置分区')
-  assert.ok(bin, '缺少回收站分区')
+  assert.ok(main, '缺少设置分区')
   assert.equal(typeof main.component, 'function')
-  assert.equal(typeof bin.component, 'function')
-  assert.notEqual(main.component, bin.component, '两个分区必须是不同组件')
-  assert.ok(main.options.order < bin.options.order, '回收站排在主页面之后')
   assert.equal(main.options.name, 'settings.section')
+  assert.equal(main.options.label(), '会话删除')
+  // The recycle bin is a tab of that page, not a nav entry of its own: two
+  // entries meant two nearly identical toolbars and two places to look.
+  const sections = client.slots.filter((entry) => entry.options.name === 'settings.section')
+  assert.equal(sections.length, 1, `设置页里应当只有这一个分区：${sections.map(e => e.options.id).join(', ')}`)
+  assert.equal(sectionById(client, 'session-recycle-recycled'), undefined, '回收站不该再有自己的分区')
 })
 
 await check('注册会话头部按钮、删除弹窗、配置弹窗与 toast（空工作区询问已并入设置页）', () => {
@@ -526,11 +561,16 @@ await check('字典：源码里用到的每个键都有中英文案', () => {
   assert.ok(used.size > 30, `只找到 ${used.size} 个键，抽取大概失效了`)
 })
 
-await check('字典：写死的回收站分区标签与主分区不同', () => {
+await check('字典：两个标签页的文案与分区标题都不相同', () => {
   const client = makeClient()
   const dict = client.dictionaries['session-recycle']
-  assert.notEqual(dict.zh['settings.nav'], dict.zh['settings.recycleNav'])
-  assert.notEqual(dict.en['settings.nav'], dict.en['settings.recycleNav'])
+  for (const lang of ['zh', 'en']) {
+    const tabLabels = [dict[lang]['settings.sessions'], dict[lang]['settings.recycle']]
+    assert.equal(new Set(tabLabels).size, 2, `${lang}：两个标签不该同名 — ${tabLabels.join(' / ')}`)
+    for (const label of tabLabels) {
+      assert.notEqual(label, dict[lang]['settings.nav'], `${lang}：标签不该和分区名一样`)
+    }
+  }
 })
 
 // --- 3. the session list -----------------------------------------------------
@@ -584,23 +624,76 @@ await check('空会话库给出专门的空状态', async () => {
   assert.ok(textOf(tree).includes('没有可删除的会话'))
 })
 
-await check('主页面带有会话列表与打开回收站的入口', async () => {
+await check('页面顶部是标签条：两个列表 + 配置按钮', async () => {
   const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED })
-  const panel = sectionById(client, 'session-recycle-settings').component
-  const tree = await client.runtime.render(panel)
-  const text = textOf(tree)
-  assert.ok(text.includes('会话列表'), '缺少会话列表标题')
-  assert.ok(text.includes('打开回收站'), '缺少回收站入口按钮')
-  assert.ok(text.includes('回收站：1 条待处理'), `入口应报出待处理条数：${text}`)
-  // The recycle list itself must NOT be on this page any more.
-  assert.ok(!text.includes('旧会话'), '回收站条目不该出现在主设置页')
+  const tree = await tabTree(client)
+
+  const list = nodes(tree, (node) => node.props?.role === 'tablist')[0]
+  assert.ok(list, '缺少标签条')
+  assert.equal(list.props['aria-label'], '会话删除页签')
+  const sessions = tabButton(tree, 'sessions')
+  const recycle = tabButton(tree, 'recycle')
+  assert.ok(sessions && recycle, `缺少标签按钮：${reachable(tree)}`)
+  assert.equal(textOf(sessions), '会话列表2', `标签带自己的条数：${textOf(sessions)}`)
+  assert.equal(sessions.props['aria-selected'], true, '默认停在会话列表')
+  assert.equal(recycle.props['aria-selected'], false)
+  assert.ok(buttonByText(tree, '配置'), '配置按钮应当在标签条上')
+  // Before the bin has ever been opened its count is unknown, so no badge —
+  // the pane is not mounted until the tab is clicked, and the count comes with
+  // it. The bin's second tab carries no number rather than a made-up zero.
+  assert.equal(textOf(recycle), '回收站', `未打开时不该报数：${textOf(recycle)}`)
 })
 
-await check('主页面只剩列表：设置项收进右上角「配置」按钮', async () => {
+await check('点回收站标签切到回收站列表，会话列表留在树上但被隐藏', async () => {
+  const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED })
+  const panel = panelOf(client)
+  let tree = await tabTree(client)
+  assert.equal(paneOf(tree, 'recycle'), undefined, '没点过就不该挂载回收站')
+
+  tabButton(tree, 'recycle').props.onClick()
+  tree = await client.runtime.settle(panel)
+
+  assert.equal(tabButton(tree, 'recycle').props['aria-selected'], true)
+  assert.equal(tabButton(tree, 'sessions').props['aria-selected'], false)
+  const bin = paneOf(tree, 'recycle')
+  assert.ok(bin, '回收站面板应当出现')
+  assert.equal(bin.props.style.display, undefined, '当前标签要可见')
+  assert.equal(paneOf(tree, 'sessions').props.style.display, 'none', '另一个标签要隐藏')
+  assert.ok(textOf(bin).includes('旧会话'), '回收站条目应当出现')
+  // The count lands on the tab as soon as the pane has read its list.
+  assert.equal(textOf(tabButton(tree, 'recycle')), '回收站1', `标签应当报数：${textOf(tabButton(tree, 'recycle'))}`)
+})
+
+await check('切回会话列表：勾选还在，列表也不再重拉一次', async () => {
+  const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED })
+  const panel = panelOf(client)
+  let tree = await tabTree(client)
+
+  boxes(tree)[0].props.onChange()
+  tree = await client.runtime.settle(panel)
+  assert.ok(textOf(tree).includes('已选 1 条'))
+  const listCalls = countCalls(client, '/__session-recycle/list')
+  assert.equal(listCalls, 1)
+
+  tabButton(tree, 'recycle').props.onClick()
+  tree = await client.runtime.settle(panel)
+  tabButton(tree, 'sessions').props.onClick()
+  tree = await client.runtime.settle(panel)
+
+  // Hiding beats unmounting: a tick placed before a peek into the bin is still
+  // there, and the panel did not fetch the list a second time.
+  assert.equal(paneOf(tree, 'sessions').props.style.display, undefined)
+  assert.equal(boxes(paneOf(tree, 'sessions')).filter(box => box.props.checked).length, 1, '勾选应当保留')
+  assert.ok(textOf(paneOf(tree, 'sessions')).includes('已选 1 条'))
+  assert.equal(countCalls(client, '/__session-recycle/list'), listCalls, '标签来回切不该重拉会话列表')
+  assert.equal(countCalls(client, '/__session-recycle/recycled'), 1, '回收站也只拉一次')
+})
+
+await check('tabs 之外的设置项都收进右上角「配置」按钮', async () => {
   const client = makeClient({ sessions: SESSIONS })
   const { page, config } = await openConfig(client)
   const text = textOf(page)
-  // The page is a list. Every preference lives in the dialog.
+  // The page is two lists and a tab strip. Every preference lives in the dialog.
   assert.ok(!text.includes('删除单个会话时先确认'), `页面上不该再有设置项：${text}`)
   assert.ok(!text.includes('空分组与空目录'), `页面上不该再有清理行：${text}`)
   assert.equal(prefBox(page, '删除'), undefined, '页面上不该有设置行的复选框')
@@ -679,12 +772,11 @@ await check('回收站关闭时确认文案改为永久删除的警告', async (
   assert.ok(textOf(tree).includes('永久删除'), `缺少永久删除警告：${textOf(tree)}`)
 })
 
-// --- 5. the recycle section --------------------------------------------------
+// --- 5. the recycle tab ------------------------------------------------------
 
-await check('回收站页面渲染条目、还原按钮与批量操作', async () => {
+await check('回收站标签页渲染条目、还原按钮与批量操作', async () => {
   const client = makeClient({ recycled: RECYCLED })
-  const panel = sectionById(client, 'session-recycle-recycled').component
-  const tree = await client.runtime.render(panel)
+  const tree = await binPane(client)
   const text = textOf(tree)
   assert.ok(text.includes('旧会话'), '缺少回收站条目标题')
   assert.ok(text.includes('session-9'), '缺少条目 id')
@@ -695,16 +787,15 @@ await check('回收站页面渲染条目、还原按钮与批量操作', async (
 
 await check('回收站为空时给出空状态', async () => {
   const client = makeClient({ recycled: [] })
-  const panel = sectionById(client, 'session-recycle-recycled').component
-  const tree = await client.runtime.render(panel)
+  const tree = await binPane(client)
   assert.ok(textOf(tree).includes('回收站里没有可还原的会话'))
 })
 
 await check('点行内还原只还原那一行', async () => {
   const client = makeClient({ recycled: RECYCLED })
-  const panel = sectionById(client, 'session-recycle-recycled').component
-  let tree = await client.runtime.render(panel)
-  await buttonByText(tree, '还原').props.onClick()
+  const panel = panelOf(client)
+  let tree = await tabTree(client, 'recycle')
+  await buttonByText(paneOf(tree, 'recycle'), '还原').props.onClick()
   tree = await client.runtime.settle(panel)
   const restored = client.calls.filter(call => call.path === '/__session-recycle/restore')
   assert.equal(restored.length, 1)
@@ -713,35 +804,53 @@ await check('点行内还原只还原那一行', async () => {
 
 await check('批量彻底删除逐条走 purge', async () => {
   const client = makeClient({ recycled: [{ ...RECYCLED[0] }, { ...RECYCLED[0], sessionId: 'session-10', title: '另一个' }] })
-  const panel = sectionById(client, 'session-recycle-recycled').component
-  let tree = await client.runtime.render(panel)
-  for (const box of boxes(tree)) box.props.onChange()
+  const panel = panelOf(client)
+  let tree = await tabTree(client, 'recycle')
+  const bin = paneOf(tree, 'recycle')
+  for (const box of boxes(bin)) box.props.onChange()
   tree = await client.runtime.settle(panel)
-  await buttonByText(tree, '彻底删除').props.onClick()
+  await buttonByText(paneOf(tree, 'recycle'), '彻底删除').props.onClick()
   tree = await client.runtime.settle(panel)
   const purged = client.calls.filter(call => call.path === '/__session-recycle/purge')
   assert.equal(purged.length, 2)
   assert.deepEqual(purged.map(call => call.body.sessionId).sort(), ['session-10', 'session-9'])
 })
 
-// --- 6. cross-section navigation --------------------------------------------
+// --- 6. tabs ------------------------------------------------------------------
 
-await check('打开回收站调用外壳的 openSection，指向回收站分区', async () => {
+await check('切标签是页内的事：不碰外壳的 openSection，也不做导航点击', async () => {
   const opened = []
   const shell = { create: () => ({ actions: { openSection: (id) => opened.push(id) } }) }
-  const client = makeClient({ sessions: SESSIONS, shell })
-  const panel = sectionById(client, 'session-recycle-settings').component
-  const tree = await client.runtime.render(panel)
-  buttonByText(tree, '打开回收站').props.onClick()
-  assert.deepEqual(opened, ['session-recycle-recycled'])
+  const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED, shell })
+  const panel = panelOf(client)
+  let tree = await tabTree(client)
+  tabButton(tree, 'recycle').props.onClick()
+  tree = await client.runtime.settle(panel)
+  // The old design left the page for a second section; now the bin is a tab,
+  // so no shell navigation is involved at all.
+  assert.deepEqual(opened, [], '切标签不该去动外壳的分区')
+  assert.ok(paneOf(tree, 'recycle'), '回收站应当就地在页面上展开')
 })
 
-await check('外壳没有 openSection 时回落到导航点击而非抛错', async () => {
-  const shell = { create: () => ({ actions: {} }) }
-  const client = makeClient({ sessions: SESSIONS, shell })
-  const panel = sectionById(client, 'session-recycle-settings').component
-  const tree = await client.runtime.render(panel)
-  assert.doesNotThrow(() => buttonByText(tree, '打开回收站').props.onClick())
+await check('回收站的勾选也在来回切标签时保留', async () => {
+  const client = makeClient({ sessions: SESSIONS, recycled: [{ ...RECYCLED[0] }, { ...RECYCLED[0], sessionId: 'session-10', title: '另一个' }] })
+  const panel = panelOf(client)
+  let tree = await tabTree(client, 'recycle')
+
+  boxes(paneOf(tree, 'recycle'))[0].props.onChange()
+  tree = await client.runtime.settle(panel)
+  assert.ok(textOf(paneOf(tree, 'recycle')).includes('已选 1 条'))
+
+  tabButton(tree, 'sessions').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(paneOf(tree, 'recycle').props.style.display, 'none', '会话标签下回收站应当被隐藏')
+
+  tabButton(tree, 'recycle').props.onClick()
+  tree = await client.runtime.settle(panel)
+  const bin = paneOf(tree, 'recycle')
+  assert.equal(bin.props.style.display, undefined)
+  assert.equal(boxes(bin).filter(box => box.props.checked).length, 1, '回收站的勾选也该保留')
+  assert.ok(textOf(bin).includes('已选 1 条'))
 })
 
 await check('批量删除时，清空的是当前打开的那个会话而不是列表第一条', async () => {
@@ -954,8 +1063,6 @@ const rowTitles = (tree) => {
     .map(textOf)
 }
 
-const countCalls = (client, path) => client.calls.filter(call => call.path === path).length
-
 await check('会话列表分页：默认每页 50 行，翻页换一批', async () => {
   const client = makeClient({ sessions: manySessions(60) })
   const panel = sectionById(client, 'session-recycle-settings').component
@@ -1055,14 +1162,14 @@ await check('回收站列表用同一套分页', async () => {
     label: `旧会话 ${index + 1}`,
   }))
   const client = makeClient({ recycled })
-  const panel = sectionById(client, 'session-recycle-recycled').component
-  let tree = await client.runtime.render(panel)
-  assert.equal(boxes(tree).length, 50)
-  assert.ok(textOf(tree).includes('共 55 个会话'), textOf(tree).slice(0, 200))
+  const panel = panelOf(client)
+  let tree = await tabTree(client, 'recycle')
+  assert.equal(boxes(paneOf(tree, 'recycle')).length, 50)
+  assert.ok(textOf(paneOf(tree, 'recycle')).includes('共 55 个会话'), textOf(paneOf(tree, 'recycle')).slice(0, 200))
 
-  await buttonByText(tree, '下一页').props.onClick()
+  await buttonByText(paneOf(tree, 'recycle'), '下一页').props.onClick()
   tree = await client.runtime.settle(panel)
-  assert.equal(boxes(tree).length, 5)
+  assert.equal(boxes(paneOf(tree, 'recycle')).length, 5)
 })
 
 await check('空分组计数只在打开配置弹窗时才去读', async () => {
