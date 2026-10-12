@@ -49,10 +49,25 @@ function makeCtx(root) {
   const workspaces = new Map()
   const sessionsTable = new Map()
   const emitted = []
+  // The live workspace registry. Off by default, because most sections exercise
+  // the storage-table path (which is what the plugin falls back to); the ones
+  // that remove a workspace turn it on so `removeWorkspace` has something to
+  // call.
+  const registry = {
+    enabled: false,
+    get: (id) => {
+      const record = workspaces.get(id) ?? workspaces.get(String(id))
+      if (record === undefined || record === null) return undefined
+      return { ...record, attachSession: async () => {} }
+    },
+    list: () => [...workspaces.values()].map(record => ({ id: String(record.id), title: record.title, path: record.path })),
+    delete: async (id) => workspaces.delete(id) || workspaces.delete(String(id)),
+  }
   return {
     emitted,
     workspaces,
     sessionsTable,
+    registry,
     get(name) {
       if (name === 'storageDomain') {
         return {
@@ -61,7 +76,7 @@ function makeCtx(root) {
             if (unit === 'workspace') return {
               table: () => ({
                 entries: () => workspaces.entries(),
-                get: (id) => workspaces.get(id),
+                get: (id) => workspaces.get(id) ?? workspaces.get(String(id)),
                 put: async (id, rec) => workspaces.set(id, rec),
               }),
             }
@@ -71,7 +86,7 @@ function makeCtx(root) {
       }
       if (name === 'sessions') return { get: () => undefined }
       if (name === 'agents') return { get: () => undefined }
-      if (name === 'workspaceRegistry') return undefined
+      if (name === 'workspaceRegistry') return registry.enabled ? registry : undefined
       return undefined
     },
     emit(event, payload) { emitted.push([event, payload]) },
@@ -187,14 +202,42 @@ function makeCtx(root) {
   const root = mkdtempSync(join(tmpdir(), 'sr-test4-'))
   process.env.DSH_HOME = root
   check('默认设置', () => {
-    // readSettings is not exported; exercise through writeSettings indirectly is not possible,
-    // so just confirm DEFAULT_SETTINGS shape.
     assert.deepEqual({ ...mod.DEFAULT_SETTINGS }, {
       confirmSingleDelete: true,
-      askRemoveEmptyWorkspace: true,
+      emptyWorkspaceAction: 'ask',
       useRecycleBin: true,
     })
   })
+  check('空工作区策略只有三个取值', () => {
+    assert.deepEqual([...mod.EMPTY_WORKSPACE_ACTIONS], ['ask', 'auto', 'keep'])
+  })
+
+  const { routes } = mountRoutes(root)
+  const write = (body) => callRoute(routes, '/__session-recycle/settings', makeRequest('POST', body))
+  const read = async () => (await callRoute(routes, '/__session-recycle/settings', makeRequest('GET'))).json().settings
+
+  await write({ emptyWorkspaceAction: 'auto' })
+  const autoSettings = await read()
+  check('emptyWorkspaceAction 可写入并读回', () => assert.equal(autoSettings.emptyWorkspaceAction, 'auto'))
+
+  await write({ emptyWorkspaceAction: 'nonsense' })
+  const keptAfterJunk = await read()
+  check('非法策略被忽略，保留原值', () => assert.equal(keptAfterJunk.emptyWorkspaceAction, 'auto'))
+
+  // The old boolean, both ways round: true meant "ask", false meant "do not
+  // ask" — which is `keep`, never `auto`.
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ askRemoveEmptyWorkspace: false }))
+  const legacyFalse = await read()
+  check('旧布尔 false 迁移成 keep', () => assert.equal(legacyFalse.emptyWorkspaceAction, 'keep'))
+
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ askRemoveEmptyWorkspace: true }))
+  const legacyTrue = await read()
+  check('旧布尔 true 迁移成 ask', () => assert.equal(legacyTrue.emptyWorkspaceAction, 'ask'))
+
+  await write({ askRemoveEmptyWorkspace: false })
+  const legacyWrite = await read()
+  check('旧布尔键仍可写入（缓存中的旧客户端）', () => assert.equal(legacyWrite.emptyWorkspaceAction, 'keep'))
+
   rmSync(root, { recursive: true, force: true })
 }
 
@@ -445,6 +488,155 @@ async function callRoute(routes, path, request) {
   check('/delete-many permanent 后目录消失', () => {
     assert.equal(existsSync(join(sessionsRoot, slug, sid)), false)
   })
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5f. the empty-workspace policy decides what a delete does afterwards ---
+//
+// Three policies, one scenario: delete the only session of a workspace and see
+// who cleans up. `ask` must hand the list to the client and touch nothing,
+// `auto` must remove it (and its now-empty folder) without asking, `keep` must
+// leave both alone.
+for (const [policy, expectDialog, expectRemoved] of [['ask', true, false], ['auto', false, true], ['keep', false, false]]) {
+  const root = mkdtempSync(join(tmpdir(), `sr-test5f-${policy}-`))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const cwd = 'd:/work/policy'
+  const slug = mod.sessionFolderName(cwd)
+  const sid = 'session-eeee1111-2222-3333-4444-555555555551'
+  makeSession(sessionsRoot, slug, sid, cwd)
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ emptyWorkspaceAction: policy }))
+
+  const { routes, ctx } = mountRoutes(root)
+  ctx.registry.enabled = true
+  ctx.workspaces.set('ws-policy', { id: 'ws-policy', title: 'policy', path: cwd, sessionIds: [sid] })
+
+  const res = await callRoute(routes, '/__session-recycle/delete-many', makeRequest('POST', { sessionIds: [sid] }))
+  const payload = res.json()
+
+  check(`策略 ${policy}：${
+    expectDialog ? '交给客户端询问' : expectRemoved ? '直接移除' : '原样保留'
+  }`, () => {
+    assert.equal(res.status, 200)
+    assert.equal(payload.emptiedWorkspaceAction, policy)
+    assert.equal(payload.emptiedWorkspaces.length, expectDialog ? 1 : 0)
+    assert.equal(payload.removedWorkspaces.length, expectRemoved ? 1 : 0)
+    assert.equal(ctx.workspaces.has('ws-policy'), !expectRemoved)
+  })
+
+  check(`策略 ${policy}：磁盘空目录${expectRemoved ? '被清掉' : '保留'}`, () => {
+    assert.equal(existsSync(join(sessionsRoot, slug)), !expectRemoved)
+  })
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5g. /empty-dirs and /prune-empty ---
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5g-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  // One folder emptied by a deletion, one still holding a session: only the
+  // first may go.
+  const emptySlug = mod.sessionFolderName('d:/work/empty')
+  const busySlug = mod.sessionFolderName('d:/work/busy')
+  mkdirSync(join(sessionsRoot, emptySlug), { recursive: true })
+  makeSession(sessionsRoot, busySlug, 'session-ffff1111-2222-3333-4444-555555555551', 'd:/work/busy')
+
+  const { routes } = mountRoutes(root)
+  check('/empty-dirs 已注册', () => assert.ok(routes.has('/__session-recycle/empty-dirs')))
+
+  const listed = await callRoute(routes, '/__session-recycle/empty-dirs', makeRequest('GET'))
+  check('/empty-dirs 只报空目录', () => {
+    assert.equal(listed.status, 200)
+    assert.deepEqual(listed.json().dirs, [emptySlug])
+    assert.equal(listed.json().count, 1)
+  })
+
+  const notGet = await callRoute(routes, '/__session-recycle/empty-dirs', makeRequest('POST', {}))
+  check('/empty-dirs 拒绝非 GET', () => assert.equal(notGet.status, 405))
+
+  const cross = await callRoute(routes, '/__session-recycle/prune-empty', makeRequest('POST', {}, { 'sec-fetch-site': 'cross-site' }))
+  check('/prune-empty 拒绝跨站', () => assert.equal(cross.status, 403))
+
+  const notPost = await callRoute(routes, '/__session-recycle/prune-empty', makeRequest('GET'))
+  check('/prune-empty 拒绝非 POST', () => assert.equal(notPost.status, 405))
+
+  const pruned = await callRoute(routes, '/__session-recycle/prune-empty', makeRequest('POST', {}))
+  check('/prune-empty 删掉空目录', () => {
+    assert.equal(pruned.status, 200)
+    assert.deepEqual(pruned.json().removed, [emptySlug])
+  })
+  check('/prune-empty 不碰非空目录', () => {
+    assert.equal(existsSync(join(sessionsRoot, emptySlug)), false)
+    assert.equal(existsSync(join(sessionsRoot, busySlug, 'session-ffff1111-2222-3333-4444-555555555551')), true)
+  })
+
+  const again = await callRoute(routes, '/__session-recycle/empty-dirs', makeRequest('GET'))
+  check('/empty-dirs 清理后归零', () => assert.equal(again.json().count, 0))
+
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5h. the folder name DSH derives from a cwd ---
+//
+// The samples are copied from a real `~/.dsh/sessions` listing, including the
+// drive-letter case difference and the non-ASCII encoding, because getting this
+// wrong means pruning silently finds nothing.
+{
+  const cases = [
+    ['D:\\USER\\Desktop\\workSpace\\dsh', '--D-USER-Desktop-workSpace-dsh--'],
+    ['d:\\USER\\Desktop\\workSpace\\novel', '--d-USER-Desktop-workSpace-novel--'],
+    ['D:\\USER\\Desktop\\workSpace\\dsh\\迁移', '--D-USER-Desktop-workSpace-dsh-~8FC1~79FB--'],
+    ['D:\\USER\\Desktop\\workSpace\\小说分析', '--D-USER-Desktop-workSpace-~5C0F~8BF4~5206~6790--'],
+    ['D:\\USER\\Desktop\\workSpace\\破甲工作区\\校园跑2', '--D-USER-Desktop-workSpace-~7834~7532~5DE5~4F5C~533A-~6821~56ED~8DD12--'],
+    ['', ''],
+  ]
+  for (const [input, expected] of cases) {
+    check(`目录名编码 ${input || '(空)'}`, () => assert.equal(mod.sessionFolderName(input), expected))
+  }
+}
+
+// --- 5i. removeWorkspace prunes the folder only when it is empty ---
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5i-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const emptyCwd = 'd:/work/gone'
+  const busyCwd = 'd:/work/alive'
+  const emptySlug = mod.sessionFolderName(emptyCwd)
+  const busySlug = mod.sessionFolderName(busyCwd)
+  mkdirSync(join(sessionsRoot, emptySlug), { recursive: true })
+  makeSession(sessionsRoot, busySlug, 'session-99991111-2222-3333-4444-555555555551', busyCwd)
+
+  const ctx = makeCtx(root)
+  ctx.registry.enabled = true
+  ctx.workspaces.set('ws-gone', { id: 'ws-gone', title: 'gone', path: emptyCwd, sessionIds: [] })
+  ctx.workspaces.set('ws-alive', { id: 'ws-alive', title: 'alive', path: busyCwd, sessionIds: ['session-99991111-2222-3333-4444-555555555551'] })
+
+  const gone = await mod.removeWorkspace(ctx, 'ws-gone')
+  check('removeWorkspace 剪掉空目录', () => {
+    assert.equal(gone.removed, true)
+    assert.equal(gone.prunedDirs.length, 1)
+    assert.equal(existsSync(join(sessionsRoot, emptySlug)), false)
+  })
+
+  const alive = await mod.removeWorkspace(ctx, 'ws-alive')
+  check('removeWorkspace 不碰还有会话的目录', () => {
+    assert.equal(alive.prunedDirs.length, 0)
+    assert.equal(existsSync(join(sessionsRoot, busySlug)), true)
+  })
+
+  let threw = null
+  try { await mod.removeWorkspace(ctx, 'ws-does-not-exist') } catch (error) { threw = error }
+  check('removeWorkspace 对不存在的 id 报 NOT_FOUND', () => assert.equal(threw?.code, 'NOT_FOUND'))
+
+  const noRegistry = await (async () => {
+    const bare = makeCtx(root)
+    try { await mod.removeWorkspace(bare, 'ws-gone') } catch (error) { return error?.code }
+    return null
+  })()
+  check('removeWorkspace 在无注册表时报 NO_REGISTRY', () => assert.equal(noRegistry, 'NO_REGISTRY'))
+
   rmSync(root, { recursive: true, force: true })
 }
 

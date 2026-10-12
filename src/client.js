@@ -60,14 +60,27 @@ window.__ModuleLoader__.load({
       'empty.descMany': '有 {n} 个工作区下的会话已全部删除。要把这些空分组也一起移除吗？',
       'empty.keep': '保留分组',
       'empty.remove': '移除分组',
-      'empty.note': '只移除分组，项目文件夹和会话日志都会保留。',
+      'empty.note': '只移除分组和它在磁盘上留下的空目录，项目文件夹与会话日志都会保留。',
       'empty.done': '已移除 {n} 个分组',
       'settings.nav': '会话删除',
       'settings.behaviour': '删除行为',
       'settings.confirmSingleDelete': '删除单个会话时先确认',
       'settings.confirmSingleDeleteHint': '关闭后点删除会直接执行，不再弹确认框。',
-      'settings.askEmpty': '删空后询问是否移除工作区',
-      'settings.askEmptyHint': '当某个工作区下的最后一个会话被删除时，询问是否一并移除该分组。',
+      'settings.emptyAction': '删空后如何处理工作区',
+      'settings.emptyActionHint': '某个工作区下的最后一个会话被删除时：',
+      'settings.emptyAsk': '询问我',
+      'settings.emptyAuto': '自动移除',
+      'settings.emptyKeep': '保留',
+      'settings.emptyAutoRemoved': '已一并移除 {n} 个空工作区',
+      'settings.emptyAutoFailed': '有 {n} 个空工作区移除失败',
+      'settings.dirs': '磁盘上的空会话目录',
+      'settings.dirsHint': '会话删掉后，它在磁盘上留下的空文件夹（例如 sessions/--d-work-proj--），一并清掉。',
+      'settings.dirsCount': '当前有 {n} 个空目录',
+      'settings.dirsNone': '没有空目录',
+      'settings.pruneDirs': '清理',
+      'settings.pruning': '清理中…',
+      'settings.pruned': '已清理 {n} 个空目录',
+      'settings.pruneNothing': '没有空目录需要清理',
       'settings.useRecycleBin': '删除时移入回收站',
       'settings.useRecycleBinHint': '关闭后删除不可恢复。默认开启。',
       'settings.binOffWarning': '⚠ 回收站已关闭：删除将无法还原。',
@@ -138,14 +151,27 @@ window.__ModuleLoader__.load({
       'empty.descMany': 'Every session in {n} workspaces has been deleted. Remove those empty groups too?',
       'empty.keep': 'Keep the group',
       'empty.remove': 'Remove the group',
-      'empty.note': 'Only the grouping is removed. The project folder and every session log are kept.',
+      'empty.note': 'Only the grouping and the empty folder it left on disk are removed. The project folder and every session log are kept.',
       'empty.done': 'Removed {n} group(s)',
       'settings.nav': 'Session deletion',
       'settings.behaviour': 'Behaviour',
       'settings.confirmSingleDelete': 'Confirm before deleting a session',
       'settings.confirmSingleDeleteHint': 'When off, clicking delete acts immediately with no dialog.',
-      'settings.askEmpty': 'Offer to remove an emptied workspace',
-      'settings.askEmptyHint': 'After the last session in a workspace is deleted, ask whether to drop the group as well.',
+      'settings.emptyAction': 'What to do with an emptied workspace',
+      'settings.emptyActionHint': 'When the last session in a workspace is deleted:',
+      'settings.emptyAsk': 'Ask me',
+      'settings.emptyAuto': 'Remove it',
+      'settings.emptyKeep': 'Keep it',
+      'settings.emptyAutoRemoved': 'Also removed {n} empty workspace(s)',
+      'settings.emptyAutoFailed': '{n} empty workspace(s) could not be removed',
+      'settings.dirs': 'Empty session folders on disk',
+      'settings.dirsHint': 'The empty folder a deleted session leaves behind (e.g. sessions/--d-work-proj--) can be swept in one click.',
+      'settings.dirsCount': '{n} empty folder(s)',
+      'settings.dirsNone': 'Nothing empty',
+      'settings.pruneDirs': 'Clean up',
+      'settings.pruning': 'Cleaning…',
+      'settings.pruned': 'Removed {n} empty folder(s)',
+      'settings.pruneNothing': 'No empty folder to clean',
       'settings.useRecycleBin': 'Move deleted sessions to the recycle bin',
       'settings.useRecycleBinHint': 'When off, deletion cannot be undone. On by default.',
       'settings.binOffWarning': '⚠ The recycle bin is off: deletions cannot be restored.',
@@ -215,9 +241,12 @@ window.__ModuleLoader__.load({
     // authority: a failed save reverts this mirror.
     const SETTINGS_DEFAULTS = {
       confirmSingleDelete: true,
-      askRemoveEmptyWorkspace: true,
+      emptyWorkspaceAction: 'ask',
       useRecycleBin: true,
     }
+    // Mirrors EMPTY_WORKSPACE_ACTIONS on the host; a value outside this list is
+    // never sent, and the host would reject one anyway.
+    const EMPTY_ACTIONS = ['ask', 'auto', 'keep']
     const settingsState = {
       values: { ...SETTINGS_DEFAULTS },
       loaded: false,
@@ -238,6 +267,19 @@ window.__ModuleLoader__.load({
     function settingsValue(key) {
       const value = settingsState.values[key]
       return typeof value === 'boolean' ? value : SETTINGS_DEFAULTS[key]
+    }
+
+    /**
+     * A settings value that is one of several strings.
+     *
+     * The host sends the document it stored, so an older file (or a hand-edited
+     * one) can carry a value this build does not know. Landing on the default
+     * keeps the panel consistent with what the host will do with an unknown
+     * value.
+     */
+    function settingsChoice(key, allowed, fallback) {
+      const value = settingsState.values[key]
+      return typeof value === 'string' && allowed.includes(value) ? value : fallback
     }
 
     /** Load once; failures keep the documented defaults. */
@@ -431,13 +473,19 @@ window.__ModuleLoader__.load({
     /**
      * Raise the empty-workspace prompt when the policy allows it.
      *
+     * Only `ask` reaches here. The host already reflects the policy in what it
+     * returns (`emptiedWorkspaces` is empty for `auto` and `keep`), but the
+     * guard stays because the dialog is a user-facing interruption and this
+     * function is called from paths that predate the policy — better to check
+     * twice than to ask a question the user has already answered in settings.
+     *
      * Deliberately deferred by a tick: the delete dialog is still on screen
      * showing its success state, and two modals racing for the same overlay
      * would replace one another.
      */
     function offerEmptyWorkspaceCleanup(workspaces) {
       if (!Array.isArray(workspaces) || workspaces.length === 0) return
-      if (!settingsValue('askRemoveEmptyWorkspace')) return
+      if (settingsChoice('emptyWorkspaceAction', EMPTY_ACTIONS, 'ask') !== 'ask') return
       window.setTimeout(() => {
         window.dispatchEvent(new CustomEvent(EMPTY_EVENT, { detail: { workspaces } }))
       }, 0)
@@ -482,7 +530,10 @@ window.__ModuleLoader__.load({
      * the time the seventh looks for it, and the user gets the "this workspace
      * is empty" offer several times over.
      *
-     * @returns { deleted, failed, emptiedWorkspaces } from the host.
+     * @returns { deleted, failed, emptiedWorkspaces, removedWorkspaces } from
+     *   the host. `emptiedWorkspaces` is only populated under the `ask` policy;
+     *   under `auto` the host has already removed them and reports them in
+     *   `removedWorkspaces` instead.
      */
     async function deleteSessions(sessionIds, permanent) {
       const payload = await api('/__session-recycle/delete-many', {
@@ -493,7 +544,27 @@ window.__ModuleLoader__.load({
         deleted: Array.isArray(payload.deleted) ? payload.deleted : [],
         failed: Array.isArray(payload.failed) ? payload.failed : [],
         emptiedWorkspaces: Array.isArray(payload.emptiedWorkspaces) ? payload.emptiedWorkspaces : [],
+        removedWorkspaces: Array.isArray(payload.removedWorkspaces) ? payload.removedWorkspaces : [],
+        workspaceRemovalFailed: Array.isArray(payload.workspaceRemovalFailed) ? payload.workspaceRemovalFailed : [],
       }
+    }
+
+    /**
+     * Session folders on disk that hold nothing.
+     *
+     * Deleting a session takes its payload out of the store and leaves the
+     * folder DSH made for its working directory behind. Sweeping them is the
+     * difference between "everything is deleted" and "everything is deleted
+     * but the store still shows a folder per project".
+     */
+    async function fetchEmptyDirs() {
+      const payload = await api('/__session-recycle/empty-dirs')
+      return Array.isArray(payload.dirs) ? payload.dirs : []
+    }
+
+    async function pruneEmptyDirs() {
+      const payload = await api('/__session-recycle/prune-empty', { method: 'POST' })
+      return Array.isArray(payload.removed) ? payload.removed : []
     }
 
     /**
@@ -901,6 +972,23 @@ window.__ModuleLoader__.load({
       background: 'transparent', color: 'var(--dsw-alias-label-primary, inherit)',
     }
     const ghostBtnOffStyle = { ...ghostBtnStyle, opacity: 0.5, cursor: 'default' }
+    // Three short options read faster as a row of pills than as a select, and
+    // the panel has no styled select to borrow from the shell.
+    const choiceOffStyle = { ...ghostBtnStyle, borderRadius: 999, padding: '3px 10px' }
+    const choiceOnStyle = {
+      ...choiceOffStyle,
+      border: '1px solid var(--dsw-alias-interactive-bg-primary, #3b82f6)',
+      color: 'var(--dsw-alias-interactive-bg-primary, #3b82f6)',
+      fontWeight: 600,
+    }
+    const settingLabelStyle = { display: 'block', fontSize: 13, lineHeight: '20px' }
+    const settingHintStyle = {
+      display: 'block', fontSize: 12, lineHeight: '18px', marginTop: 2,
+      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+    }
+    const settingRowStyle = {
+      display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 0',
+    }
     const dangerOutlineBtnStyle = {
       padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
       border: '1px solid var(--dsw-alias-state-error-primary, #e5484d)',
@@ -958,7 +1046,22 @@ window.__ModuleLoader__.load({
       }
       refreshSidebar(sessionId, wasCurrent)
       offerEmptyWorkspaceCleanup(result.emptiedWorkspaces)
+      reportAutoRemoval(result, translate)
       return result
+    }
+
+    /**
+     * Say what the `auto` policy did, since it does it without asking.
+     *
+     * A group vanishing from the sidebar is otherwise unexplained, and the
+     * point of the policy is that the user asked for exactly this — so the
+     * banner is confirmation, not a warning.
+     */
+    function reportAutoRemoval(result, translate) {
+      const __ = translate || t
+      const removed = Array.isArray(result?.removedWorkspaces) ? result.removedWorkspaces : []
+      if (removed.length === 0) return
+      showToast(__('settings.emptyAutoRemoved', { n: removed.length }), 'success')
     }
 
     function DeleteDialog(props) {
@@ -1186,6 +1289,36 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * A settings row whose answer is one of several strings.
+     *
+     * `value` must be one of `options[].value`; the caller resolves it through
+     * `settingsChoice` so an unknown stored value cannot render a row with
+     * nothing selected.
+     */
+    function ChoiceRow(props) {
+      const { label, hint, value, options, disabled, onChange } = props
+      return React.createElement('div', { style: settingRowStyle }, [
+        React.createElement('span', { key: 'text', style: { flex: '1 1 auto', display: 'block' } }, [
+          React.createElement('span', { key: 'label', style: settingLabelStyle }, label),
+          React.createElement('span', { key: 'hint', style: settingHintStyle }, hint),
+        ]),
+        React.createElement('div', {
+          key: 'choices',
+          role: 'radiogroup',
+          style: { flex: 'none', display: 'flex', gap: 6, alignItems: 'center', paddingTop: 1 },
+        }, options.map(option => React.createElement('button', {
+          key: option.value,
+          type: 'button',
+          role: 'radio',
+          'aria-checked': value === option.value,
+          disabled: disabled === true,
+          onClick: () => { if (disabled !== true) onChange(option.value) },
+          style: value === option.value ? choiceOnStyle : choiceOffStyle,
+        }, option.label))),
+      ])
+    }
+
+    /**
      * The main settings section: the deletion policy, the live session list,
      * and the doorway to the recycle bin.
      *
@@ -1215,6 +1348,10 @@ window.__ModuleLoader__.load({
       // The recycle count only feeds the doorway button's label, so a failed
       // read leaves it blank instead of raising an error on this page.
       const [recycledCount, setRecycledCount] = useState(null)
+      // Same for the empty-folder count: null means "unknown", not "zero", so
+      // the Clean up button stays disabled until the host has answered.
+      const [emptyDirs, setEmptyDirs] = useState(null)
+      const [pruning, setPruning] = useState(false)
 
       useEffect(() => settingsSubscribe(() => forceRender(n => n + 1)), [])
 
@@ -1242,6 +1379,12 @@ window.__ModuleLoader__.load({
         } catch (reason) {
           setError(reason?.message ?? String(reason))
         }
+        // Every deletion can leave a folder empty, so the count is re-read on
+        // the same pass instead of in a second effect that would drift out of
+        // step with the list it describes.
+        fetchEmptyDirs()
+          .then(rows => setEmptyDirs(rows))
+          .catch(() => setEmptyDirs(null))
         if (!quiet) setLoading(false)
       }, [])
 
@@ -1315,6 +1458,10 @@ window.__ModuleLoader__.load({
           setPicked(new Set())
           await refresh(true)
           offerEmptyWorkspaceCleanup(result.emptiedWorkspaces)
+          // Under `auto` the host already dropped the emptied workspaces and
+          // left nothing to ask about; say so, because a group disappearing
+          // from the sidebar is otherwise unexplained.
+          reportAutoRemoval(result, __)
           refreshSidebar(deadCurrent ? String(current) : ids[0], deadCurrent)
           showToast(
             result.failed.length === 0
@@ -1322,14 +1469,44 @@ window.__ModuleLoader__.load({
               : __('settings.deletedManyPartial', { ok: result.deleted.length, fail: result.failed.length }),
             'success',
           )
-          if (result.failed.length > 0) {
-            setError(result.failed.slice(0, 5).map(f => `${f.sessionId}: ${f.error}`).join('\n'))
+          // One message block: a session that refused to delete and a workspace
+          // that refused to go are both "what survived", and the second must not
+          // overwrite the first.
+          const problems = result.failed.slice(0, 5).map(f => `${f.sessionId}: ${f.error}`)
+          if (result.workspaceRemovalFailed.length > 0) {
+            problems.push(__('settings.emptyAutoFailed', { n: result.workspaceRemovalFailed.length }))
           }
+          if (problems.length > 0) setError(problems.join('\n'))
         } catch (reason) {
           setError(reason?.message ?? String(reason))
         }
         setBusy(false)
       }, [picked, refresh, __])
+
+      /**
+       * Sweep the empty folders the store kept for deleted projects.
+       *
+       * Host-side and idempotent: it removes a folder only when it is actually
+       * empty, so pressing it twice is the same as pressing it once.
+       */
+      const onPruneDirs = useCallback(async () => {
+        if (pruning) return
+        setPruning(true)
+        setError(null)
+        try {
+          const removed = await pruneEmptyDirs()
+          setEmptyDirs(await fetchEmptyDirs())
+          showToast(
+            removed.length > 0
+              ? __('settings.pruned', { n: removed.length })
+              : __('settings.pruneNothing'),
+            'success',
+          )
+        } catch (reason) {
+          setError(reason?.message ?? String(reason))
+        }
+        setPruning(false)
+      }, [pruning, __])
 
       const onOpenRecycle = useCallback(() => {
         // The shell's own action first; a build that renamed it still works
@@ -1352,12 +1529,18 @@ window.__ModuleLoader__.load({
           checked: settingsValue('confirmSingleDelete'),
           onChange: (value) => updateSetting('confirmSingleDelete', value),
         }),
-        React.createElement(SettingRow, {
+        React.createElement(ChoiceRow, {
           key: 'empty',
-          label: __('settings.askEmpty'),
-          hint: __('settings.askEmptyHint'),
-          checked: settingsValue('askRemoveEmptyWorkspace'),
-          onChange: (value) => updateSetting('askRemoveEmptyWorkspace', value),
+          label: __('settings.emptyAction'),
+          hint: __('settings.emptyActionHint'),
+          value: settingsChoice('emptyWorkspaceAction', EMPTY_ACTIONS, 'ask'),
+          options: [
+            { value: 'ask', label: __('settings.emptyAsk') },
+            { value: 'auto', label: __('settings.emptyAuto') },
+            { value: 'keep', label: __('settings.emptyKeep') },
+          ],
+          disabled: busy,
+          onChange: (value) => updateSetting('emptyWorkspaceAction', value),
         }),
         React.createElement(SettingRow, {
           key: 'bin',
@@ -1370,6 +1553,26 @@ window.__ModuleLoader__.load({
           ? React.createElement('div', { key: 'binwarn', style: { ...errStyle, marginTop: 6 } },
               __('settings.binOffWarning'))
           : null,
+
+        // The store keeps a folder per working directory, and a folder whose
+        // sessions are all gone holds nothing. The count is here because the
+        // user cannot otherwise tell whether a sweep is worth pressing.
+        React.createElement('div', { key: 'dirs', style: settingRowStyle }, [
+          React.createElement('span', { key: 'text', style: { flex: '1 1 auto', display: 'block' } }, [
+            React.createElement('span', { key: 'label', style: settingLabelStyle }, __('settings.dirs')),
+            React.createElement('span', { key: 'hint', style: settingHintStyle },
+              emptyDirs === null
+                ? __('settings.dirsHint')
+                : `${emptyDirs.length === 0 ? __('settings.dirsNone') : __('settings.dirsCount', { n: emptyDirs.length })}｜${__('settings.dirsHint')}`),
+          ]),
+          React.createElement('button', {
+            key: 'go',
+            type: 'button',
+            disabled: pruning || emptyDirs === null || emptyDirs.length === 0,
+            style: pruning || emptyDirs === null || emptyDirs.length === 0 ? ghostBtnOffStyle : ghostBtnStyle,
+            onClick: onPruneDirs,
+          }, pruning ? __('settings.pruning') : __('settings.pruneDirs')),
+        ]),
 
         React.createElement('div', { key: 'h2', style: headingStyle }, __('settings.sessions')),
         React.createElement('div', { key: 'shint', style: hintStyle }, __('settings.sessionsHint')),

@@ -37,12 +37,21 @@ const inject = ['tools']
 // down with it. Reads are tolerant, writes are atomic-ish (temp + rename), and
 // every failure falls back to the documented default.
 
+/**
+ * What happens to a workspace the last deletion emptied.
+ *
+ *   `ask`  — hand the list to the client, which asks the user (the default)
+ *   `auto` — remove the grouping (and its empty folder) as part of the delete
+ *   `keep` — leave the empty group alone
+ */
+export const EMPTY_WORKSPACE_ACTIONS = Object.freeze(['ask', 'auto', 'keep'])
+
 /** Documented defaults; also the fallback for any unreadable or partial file. */
 export const DEFAULT_SETTINGS = Object.freeze({
   /** Ask before deleting a session, or delete immediately on confirm. */
   confirmSingleDelete: true,
-  /** After the last session in a workspace goes, offer to remove the workspace. */
-  askRemoveEmptyWorkspace: true,
+  /** After the last session in a workspace goes: ask, remove it, or keep it. */
+  emptyWorkspaceAction: 'ask',
   /** Move to the OS recycle bin instead of deleting outright. */
   useRecycleBin: true,
 })
@@ -58,6 +67,30 @@ function boolOr(value, fallback) {
   return typeof value === 'boolean' ? value : fallback
 }
 
+/** Coerce one stored value to a member of `allowed`, falling back otherwise. */
+function enumOr(value, allowed, fallback) {
+  return typeof value === 'string' && allowed.includes(value) ? value : fallback
+}
+
+/**
+ * The empty-workspace policy, including its older spelling.
+ *
+ * `askRemoveEmptyWorkspace` was a plain switch where `true` meant "ask" and
+ * `false` meant "say nothing, change nothing". Both readings survive the
+ * upgrade: `false` maps to `keep`, never to `auto` — "stop asking me" is not
+ * the same instruction as "delete it silently", and guessing wrong there would
+ * drop groupings the user only ever asked to stop being interrupted about.
+ */
+function readEmptyAction(parsed) {
+  if (typeof parsed.emptyWorkspaceAction === 'string') {
+    return enumOr(parsed.emptyWorkspaceAction, EMPTY_WORKSPACE_ACTIONS, DEFAULT_SETTINGS.emptyWorkspaceAction)
+  }
+  if (typeof parsed.askRemoveEmptyWorkspace === 'boolean') {
+    return parsed.askRemoveEmptyWorkspace ? 'ask' : 'keep'
+  }
+  return DEFAULT_SETTINGS.emptyWorkspaceAction
+}
+
 /** Read settings; any failure yields the defaults rather than throwing. */
 function readSettings() {
   try {
@@ -66,7 +99,7 @@ function readSettings() {
     if (parsed === null || typeof parsed !== 'object') return { ...DEFAULT_SETTINGS }
     return {
       confirmSingleDelete: boolOr(parsed.confirmSingleDelete, DEFAULT_SETTINGS.confirmSingleDelete),
-      askRemoveEmptyWorkspace: boolOr(parsed.askRemoveEmptyWorkspace, DEFAULT_SETTINGS.askRemoveEmptyWorkspace),
+      emptyWorkspaceAction: readEmptyAction(parsed),
       useRecycleBin: boolOr(parsed.useRecycleBin, DEFAULT_SETTINGS.useRecycleBin),
     }
   } catch {
@@ -87,8 +120,19 @@ let settingsWriteSeq = 0
 
 function writeSettings(patch) {
   const next = { ...readSettings() }
+  const given = (key) => patch !== null && typeof patch === 'object' && patch[key] !== undefined
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
-    if (patch !== null && typeof patch === 'object' && typeof patch[key] === 'boolean') next[key] = patch[key]
+    if (!given(key)) continue
+    if (key === 'emptyWorkspaceAction') {
+      if (typeof patch[key] === 'string' && EMPTY_WORKSPACE_ACTIONS.includes(patch[key])) next[key] = patch[key]
+      continue
+    }
+    if (typeof patch[key] === 'boolean') next[key] = patch[key]
+  }
+  // A cached client bundle may still send the old boolean key. Accepting it
+  // keeps an update from leaving a switch that writes a field nothing reads.
+  if (given('askRemoveEmptyWorkspace') && typeof patch.askRemoveEmptyWorkspace === 'boolean') {
+    next.emptyWorkspaceAction = patch.askRemoveEmptyWorkspace ? 'ask' : 'keep'
   }
   let written = false
   try {
@@ -213,6 +257,115 @@ export function listStoredSessions() {
   }
   out.sort((a, b) => b.modifiedAt - a.modifiedAt)
   return out
+}
+
+// --- empty session folders ----------------------------------------------------
+//
+// Deleting a session moves its *payload* out of the store, but the folder the
+// backend made for its working directory stays: `sessions/--d-work-proj--/`
+// survives with nothing in it. DSH never notices, because the name is derived
+// from the cwd and is recreated on demand — but the user browsing `~/.dsh` (or
+// cleaning up after deleting every session of a project) is left with a row of
+// empty folders, one per project they ever opened. They carry no data, so they
+// are safe to remove; they are only ever removed when they are actually empty.
+
+/**
+ * The folder name DSH derives from a working directory.
+ *
+ * Measured against a real store rather than documented anywhere: every
+ * separator run collapses to a single `-`, the whole thing is wrapped in `--`,
+ * and each character outside ASCII becomes `~` plus its UTF-16 code unit in
+ * upper-case hex (exactly four digits, no terminator) — so
+ * `D:\USER\Desktop\workSpace\dsh` becomes `--D-USER-Desktop-workSpace-dsh--`,
+ * `小说分析` becomes `~5C0F~8BF4~5206~6790`, and the trailing `2` of `校园跑2`
+ * simply follows the `~8DD1` that encodes `跑`. The drive letter keeps whatever
+ * case the path was registered with, which is why callers must try more than
+ * one spelling (see `candidateSessionFolders`).
+ */
+export function sessionFolderName(cwd) {
+  if (typeof cwd !== 'string' || cwd.length === 0) return ''
+  const flattened = cwd.replace(/[:\\/]+/g, '-')
+  const encoded = flattened.replace(
+    /[^\x20-\x7E]/g,
+    (ch) => `~${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`,
+  )
+  return `--${encoded}--`
+}
+
+/**
+ * Every folder name a cwd could have produced.
+ *
+ * The encoding does not normalise case, and the same project shows up in the
+ * registry as both `D:\...` and `d:\...` depending on how it was first opened,
+ * so the drive letter is tried in both cases. A miss is harmless: pruning only
+ * ever removes a folder that is already empty.
+ */
+function candidateSessionFolders(cwd) {
+  const exact = sessionFolderName(cwd)
+  if (exact.length === 0) return []
+  const names = new Set([exact])
+  const swapped = exact.replace(/^--([a-z])/i, (_all, letter) => `--${letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()}`)
+  if (swapped !== exact) names.add(swapped)
+  return [...names]
+}
+
+/**
+ * Remove the session folder a workspace's cwd is stored under, if it is empty.
+ *
+ * @returns the absolute paths that were removed (normally one, often none).
+ */
+export function pruneEmptySessionFolder(cwd) {
+  const root = sessionsRoot()
+  const removed = []
+  for (const name of candidateSessionFolders(cwd)) {
+    const full = path.resolve(path.join(root, name))
+    if (full === root || !full.startsWith(root + path.sep)) continue
+    try {
+      if (!fs.lstatSync(full).isDirectory()) continue
+      // Non-recursive on purpose: `rmdir` refuses a folder with anything in it,
+      // so a session that was not part of this deletion can never be caught.
+      if (fs.readdirSync(full).length > 0) continue
+      fs.rmdirSync(full)
+      removed.push(full)
+    } catch { /* absent, already gone, or locked: nothing to report */ }
+  }
+  return removed
+}
+
+/** Session folders in the store that hold nothing, by name, sorted. */
+export function listEmptySessionFolders() {
+  const root = sessionsRoot()
+  let entries
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const out = []
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const full = path.resolve(path.join(root, entry.name))
+    if (full === root || !full.startsWith(root + path.sep)) continue
+    try {
+      if (fs.readdirSync(full).length === 0) out.push(entry.name)
+    } catch { /* unreadable: leave it alone */ }
+  }
+  return out.sort()
+}
+
+/** Sweep every empty session folder. @returns the names removed. */
+export function pruneEmptySessionFolders() {
+  const root = sessionsRoot()
+  const removed = []
+  for (const name of listEmptySessionFolders()) {
+    const full = path.resolve(path.join(root, name))
+    if (full === root || !full.startsWith(root + path.sep)) continue
+    try {
+      fs.rmdirSync(full)
+      removed.push(name)
+    } catch { /* raced with a new session, or locked: keep it */ }
+  }
+  return removed
 }
 
 // --- recycle bin -------------------------------------------------------------
@@ -959,22 +1112,100 @@ function emptiedFromHolders(ctx, holders) {
 }
 
 /**
+ * The project folder behind a workspace id.
+ *
+ * The registry handle and the storage table disagree about nothing except
+ * availability, so both are tried: the handle is the live object (and carries
+ * `path`), the table is what survives when no registry is wired up. An empty
+ * answer just means "nothing to prune", never an error.
+ */
+function workspacePath(ctx, workspaceId) {
+  try {
+    const registry = ctx.get('workspaceRegistry')
+    if (registry && typeof registry.get === 'function') {
+      const handle = registry.get(workspaceId)
+      const fromHandle = handle && typeof handle.path === 'string' ? handle.path : ''
+      if (fromHandle.length > 0) return fromHandle
+    }
+  } catch { /* fall through to the table */ }
+  try {
+    const sd = ctx.get('storageDomain')
+    const ws = sd && typeof sd.get === 'function' ? sd.get('workspace') : undefined
+    const table = ws && typeof ws.table === 'function' ? ws.table('workspaces') : undefined
+    const record = table && typeof table.get === 'function' ? table.get(workspaceId) : undefined
+    if (record && typeof record.path === 'string') return record.path
+  } catch { /* no table: nothing to prune */ }
+  return ''
+}
+
+/**
  * Remove one workspace registration.
  *
- * Only the registry entry goes: the project directory and every session log are
- * untouched, exactly like the harness's own "delete workspace". Sessions that
- * somehow still reference it simply render under Ungrouped.
+ * The registry entry goes, plus the session folder its cwd is stored under —
+ * but only when that folder is empty, which after the workspace's last session
+ * was deleted it is. The project directory itself and every session log are
+ * untouched, exactly like the harness's own "delete workspace": the folder
+ * pruned here is DSH's own derived index of that path, not the path. Sessions
+ * that somehow still reference it simply render under Ungrouped.
+ *
+ * @returns { workspaceId, removed, prunedDirs } — the pruned paths are reported
+ *   so a caller can say what was cleaned rather than implying it.
  */
 export async function removeWorkspace(ctx, workspaceId) {
   const registry = ctx.get('workspaceRegistry')
   if (!registry || typeof registry.delete !== 'function') {
     throw new SessionRecycleError('workspace registry unavailable', 'NO_REGISTRY')
   }
+  // Read the path BEFORE the delete: the record is what carries it.
+  const target = workspacePath(ctx, workspaceId)
   const removed = await registry.delete(workspaceId)
   if (removed !== true) {
     throw new SessionRecycleError(`no such workspace: ${workspaceId}`, 'NOT_FOUND')
   }
-  return { workspaceId, removed: true }
+  const prunedDirs = target.length > 0 ? pruneEmptySessionFolder(target) : []
+  return { workspaceId, removed: true, prunedDirs }
+}
+
+/**
+ * Apply the empty-workspace policy to what a delete just emptied.
+ *
+ * `ask` is the client's business — it owns the dialog and the host never opens
+ * one on its own. `keep` drops the list. `auto` removes the groupings here, so
+ * a bulk cleanup does not end with the sidebar full of empty shells the user
+ * has to sweep by hand, and each removal takes its empty session folder with
+ * it.
+ *
+ * One workspace failing must not cost the others: the reason lands in `failed`
+ * and the loop continues.
+ *
+ * @returns { action, removed: [{ workspaceId, title, path, prunedDirs }], failed }
+ *   `removed` is empty unless the policy is `auto`.
+ */
+async function settleEmptyWorkspaces(ctx, emptied, settings) {
+  const action = settings?.emptyWorkspaceAction ?? DEFAULT_SETTINGS.emptyWorkspaceAction
+  if (action !== 'auto' || !Array.isArray(emptied) || emptied.length === 0) {
+    return { action, removed: [], failed: [] }
+  }
+  const removed = []
+  const failed = []
+  for (const workspace of emptied) {
+    try {
+      const result = await removeWorkspace(ctx, workspace.workspaceId)
+      removed.push({
+        workspaceId: result.workspaceId,
+        title: workspace.title ?? '',
+        path: workspace.path ?? '',
+        prunedDirs: result.prunedDirs ?? [],
+      })
+    } catch (error) {
+      failed.push({
+        workspaceId: workspace.workspaceId,
+        error: error?.message ?? String(error),
+        code: error?.code ?? null,
+      })
+    }
+  }
+  return { action, removed, failed }
 }
 
 /**
@@ -1387,7 +1618,12 @@ function registerRoutes(host, ctx) {
         return
       }
       try {
-        const result = await deleteSession(ctx, sessionId, { permanent: body?.permanent === true })
+        // Read the policy once and hand it in, so the delete and the cleanup
+        // that follows it cannot disagree about what the user asked for.
+        const settings = readSettings()
+        const result = await deleteSession(ctx, sessionId, { permanent: body?.permanent === true, settings })
+        const emptied = result.emptiedWorkspaces ?? []
+        const settled = await settleEmptyWorkspaces(ctx, emptied, settings)
         sendJson(response, 200, {
           ok: true,
           sessionId: result.sessionId,
@@ -1397,8 +1633,13 @@ function registerRoutes(host, ctx) {
           workspaceRemoved: result.workspaceRemoved,
           notified: result.notified === true,
           // Offer-to-clean-up signal: the client asks the user, the host never
-          // removes a workspace on its own.
-          emptiedWorkspaces: result.emptiedWorkspaces ?? [],
+          // removes a workspace on its own — unless the policy says `auto`, in
+          // which case the emptied ones come back under `removedWorkspaces`
+          // and this list is empty so no dialog is raised.
+          emptiedWorkspaces: settled.action === 'ask' ? emptied : [],
+          emptiedWorkspaceAction: settled.action,
+          removedWorkspaces: settled.removed,
+          workspaceRemovalFailed: settled.failed,
         })
       } catch (error) {
         const status = error?.code === 'INVALID_ID' ? 400 : error?.code === 'NOT_FOUND' ? 404 : 500
@@ -1484,11 +1725,17 @@ function registerRoutes(host, ctx) {
           failed.push({ sessionId, error: error?.message ?? String(error), code: error?.code ?? null })
         }
       }
+      const settled = await settleEmptyWorkspaces(ctx, [...emptiedById.values()], settings)
       sendJson(response, 200, {
         ok: true,
         deleted,
         failed,
-        emptiedWorkspaces: [...emptiedById.values()],
+        // `auto` already removed them; `keep` leaves them; only `ask` is the
+        // client's to put in front of the user.
+        emptiedWorkspaces: settled.action === 'ask' ? [...emptiedById.values()] : [],
+        emptiedWorkspaceAction: settled.action,
+        removedWorkspaces: settled.removed,
+        workspaceRemovalFailed: settled.failed,
       })
     },
   }))
@@ -1522,7 +1769,12 @@ function registerRoutes(host, ctx) {
         sendJson(response, 400, { ok: false, error: 'body must be an object' })
         return
       }
-      const unknown = Object.keys(body).filter(key => !(key in DEFAULT_SETTINGS))
+      // `askRemoveEmptyWorkspace` is accepted on purpose rather than treated as
+      // a typo: it is the older spelling of `emptyWorkspaceAction`, and a
+      // client bundle cached from before the rename can still send it.
+      // `writeSettings` translates it, so the switch keeps working either way.
+      const writable = [...Object.keys(DEFAULT_SETTINGS), 'askRemoveEmptyWorkspace']
+      const unknown = Object.keys(body).filter(key => !writable.includes(key))
       if (unknown.length > 0) {
         sendJson(response, 400, { ok: false, error: `unknown setting: ${unknown.join(', ')}` })
         return
@@ -1668,6 +1920,50 @@ function registerRoutes(host, ctx) {
         const status = error?.code === 'NOT_RECYCLED' ? 404 : error?.code === 'OUT_OF_STORE' ? 400 : 500
         sendJson(response, status, { ok: false, error: error.message, code: error?.code })
       }
+    },
+  }))
+
+  // --- empty session folders --------------------------------------------------
+  //
+  // The store keeps one folder per working directory, and deleting every
+  // session of a project leaves that folder behind with nothing in it. Nothing
+  // breaks — DSH recreates the name on demand — but a store that has been
+  // cleaned out still shows a folder per project the user ever opened. These
+  // two routes let the settings page count them and sweep them in one click,
+  // which is also the only way to clear the ones earlier versions left behind.
+
+  disposers.push(host.register({
+    kind: 'exact',
+    path: '/__session-recycle/empty-dirs',
+    handler: async (request, response) => {
+      if (request.method !== 'GET') {
+        sendJson(response, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      if (!sameOrigin(ctx, request)) {
+        sendJson(response, 403, { ok: false, error: 'untrusted origin' })
+        return
+      }
+      const dirs = listEmptySessionFolders()
+      sendJson(response, 200, { ok: true, dirs, count: dirs.length })
+    },
+  }))
+
+  disposers.push(host.register({
+    kind: 'exact',
+    path: '/__session-recycle/prune-empty',
+    handler: async (request, response) => {
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      // Mutating route: the fence runs before anything is touched.
+      if (!sameOrigin(ctx, request)) {
+        sendJson(response, 403, { ok: false, error: 'untrusted origin' })
+        return
+      }
+      const removed = pruneEmptySessionFolders()
+      sendJson(response, 200, { ok: true, removed, count: removed.length })
     },
   }))
 
@@ -1825,7 +2121,7 @@ function apply(ctx) {
   ctx.tools.register(defineTool({
     name: 'workspace_remove',
     description:
-      'Remove one workspace (session group) from the list. Only the grouping entry is removed: the project folder and every session log are kept. Use this after deleting the last session in a workspace, when the empty group should go too.',
+      'Remove one workspace (session group) from the list. The grouping entry and the now-empty session folder DSH kept for its working directory are removed; the project folder itself and every session log are kept. Use this after deleting the last session in a workspace, when the empty group should go too.',
     parameters: {
       workspaceId: {
         type: 'string',
@@ -1841,7 +2137,8 @@ function apply(ctx) {
       const workspaceId = String(args?.workspaceId ?? '').trim()
       try {
         const result = await removeWorkspace(ctx, workspaceId)
-        return `removed workspace ${result.workspaceId}\n  the project folder and its session logs are untouched`
+        const pruned = (result.prunedDirs ?? []).length
+        return `removed workspace ${result.workspaceId}\n  the project folder and its session logs are untouched\n  pruned ${pruned} empty session folder(s)`
       } catch (error) {
         return `workspace removal failed: ${error.message}`
       }

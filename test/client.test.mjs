@@ -30,13 +30,24 @@ async function check(label, fn) {
 // --- the module loader -------------------------------------------------------
 
 let registration = null
+// Events the plugin dispatches on `window`. The stub records them instead of
+// delivering them: the dialogs themselves are rendered directly by the tests, so
+// what needs asserting is whether an event was raised at all (the "ask vs auto"
+// policy decides that).
+const windowEvents = []
 globalThis.window = {
   __ModuleLoader__: { load(definition) { registration = definition } },
   setTimeout, clearTimeout,
   requestAnimationFrame: (cb) => setTimeout(cb, 0),
-  dispatchEvent() { return true },
+  dispatchEvent(event) { windowEvents.push(event); return true },
   addEventListener() {},
   removeEventListener() {},
+}
+/** Every event of one type dispatched since the last drain. */
+const drainEvents = (type) => {
+  const mine = windowEvents.filter(event => event.type === type)
+  for (const event of mine) windowEvents.splice(windowEvents.indexOf(event), 1)
+  return mine
 }
 globalThis.CustomEvent = class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail } }
 globalThis.MutationObserver = class MutationObserver { observe() {} disconnect() {} }
@@ -222,7 +233,22 @@ const boxes = (tree) => {
  * Build a fresh client instance: a new factory call, so the module's own
  * closure state (settings, service handles) starts clean per test.
  */
-function makeClient({ sessions = [], recycled = [], settings = {}, shell, uiSession, uiWorkspace } = {}) {
+function makeClient({
+  sessions = [],
+  recycled = [],
+  settings = {},
+  shell,
+  uiSession,
+  uiWorkspace,
+  // Empty session folders the host reports, and what a sweep removes from them.
+  emptyDirs = [],
+  prunedDirs = null,
+  // What the host answers a batch delete with. `emptiedWorkspaces` is the
+  // `ask` policy's payload; `removedWorkspaces` is the `auto` policy's.
+  emptiedWorkspaces = [],
+  removedWorkspaces = [],
+  workspaceRemovalFailed = [],
+} = {}) {
   const runtime = createRuntime()
   const primitives = {
     IconTrashOutline16: function IconTrashOutline16() { return null },
@@ -238,6 +264,10 @@ function makeClient({ sessions = [], recycled = [], settings = {}, shell, uiSess
   const calls = []
   const slots = []
   const dictionaries = {}
+  // The host's settings document, mutated by POSTs exactly as the real one is:
+  // answering a save with the values from before the write would make the
+  // panel's optimistic update look like a revert.
+  const document = { ...settings }
   const locale = {
     translate: () => undefined,
     register(ns, dict) { dictionaries[ns] = dict; return () => {} },
@@ -275,16 +305,27 @@ function makeClient({ sessions = [], recycled = [], settings = {}, shell, uiSess
     calls.push({ path, method: options.method ?? 'GET', body })
     const respond = (payload) => ({ ok: true, status: 200, json: async () => payload })
     if (path === '/__session-recycle/settings') {
-      return respond({ ok: true, settings: { ...settings }, defaults: {} })
+      if ((options.method ?? 'GET') === 'POST') Object.assign(document, body ?? {})
+      return respond({ ok: true, settings: { ...document }, defaults: {} })
     }
     if (path === '/__session-recycle/list') return respond({ ok: true, sessions })
     if (path === '/__session-recycle/recycled') return respond({ ok: true, entries: recycled })
+    if (path === '/__session-recycle/empty-dirs') {
+      return respond({ ok: true, dirs: emptyDirs, count: emptyDirs.length })
+    }
+    if (path === '/__session-recycle/prune-empty') {
+      const removed = prunedDirs ?? emptyDirs
+      emptyDirs = []
+      return respond({ ok: true, removed, count: removed.length })
+    }
     if (path === '/__session-recycle/delete-many') {
       return respond({
         ok: true,
         deleted: (body?.sessionIds ?? []).map((sessionId) => ({ sessionId, recycled: true, permanent: false })),
         failed: [],
-        emptiedWorkspaces: [],
+        emptiedWorkspaces,
+        removedWorkspaces,
+        workspaceRemovalFailed,
       })
     }
     if (path === '/__session-recycle/restore') return respond({ ok: true, sessionId: body?.sessionId })
@@ -600,6 +641,141 @@ await check('批量删除时，清空的是当前打开的那个会话而不是�
   tree = await client.runtime.settle(panel)
   assert.ok(cleared.length > 0, '打开中的会话被删掉时应当清空右侧面板')
   assert.equal(cleared[0], 'session-3', '要清的是当前打开的那个，不是列表第一条')
+})
+
+// --- 6b. the empty-workspace policy -----------------------------------------
+
+await check('删空策略是三选一，点选写回 host', async () => {
+  const client = makeClient({})
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+
+  const group = nodes(tree, (node) => node.props?.role === 'radiogroup')[0]
+  assert.ok(group, `应当渲染三选一，实际按钮：${reachable(tree)}`)
+  const options = nodes(group, (node) => node.tag === 'button')
+  assert.deepEqual(options.map(textOf), ['询问我', '自动移除', '保留'], '三个取值缺一不可')
+  assert.equal(options[0].props['aria-checked'], true, '默认是「询问我」')
+
+  buttonExact(tree, '自动移除').props.onClick()
+  tree = await client.runtime.settle(panel)
+  const posted = client.calls.filter(call => call.path === '/__session-recycle/settings' && call.method === 'POST')
+  assert.deepEqual(posted.map(call => call.body), [{ emptyWorkspaceAction: 'auto' }])
+  assert.equal(buttonExact(tree, '自动移除').props['aria-checked'], true, '保存后选中态应当跟着走')
+})
+
+await check('未知的删空策略回落到默认值而不是空选中', async () => {
+  const client = makeClient({ settings: { emptyWorkspaceAction: 'wat' } })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  const options = nodes(nodes(tree, (node) => node.props?.role === 'radiogroup')[0], (node) => node.tag === 'button')
+  assert.equal(options[0].props['aria-checked'], true)
+})
+
+await check('策略为自动移除时，删除后不再弹空工作区询问', async () => {
+  drainEvents('dsh-session-recycle:empty-workspace')
+  const client = makeClient({
+    sessions: SESSIONS,
+    settings: { emptyWorkspaceAction: 'auto' },
+    removedWorkspaces: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj', prunedDirs: [] }],
+  })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+  for (const box of boxes(tree)) box.props.onChange()
+  tree = await client.runtime.settle(panel)
+  buttonByText(tree, '删除所选').props.onClick()
+  tree = await client.runtime.settle(panel)
+  await confirmDeleteButton(tree).props.onClick()
+  tree = await client.runtime.settle(panel)
+  // The offer is deferred by a tick, so give it one before asserting its absence.
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  assert.deepEqual(drainEvents('dsh-session-recycle:empty-workspace'), [], '自动移除时不该再问')
+})
+
+await check('策略为询问时，删空仍然弹一次询问', async () => {
+  drainEvents('dsh-session-recycle:empty-workspace')
+  const client = makeClient({
+    sessions: SESSIONS,
+    settings: { emptyWorkspaceAction: 'ask' },
+    emptiedWorkspaces: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj' }],
+  })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+  for (const box of boxes(tree)) box.props.onChange()
+  tree = await client.runtime.settle(panel)
+  buttonByText(tree, '删除所选').props.onClick()
+  tree = await client.runtime.settle(panel)
+  await confirmDeleteButton(tree).props.onClick()
+  tree = await client.runtime.settle(panel)
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const events = drainEvents('dsh-session-recycle:empty-workspace')
+  assert.equal(events.length, 1, '询问策略下应当弹一次')
+  assert.equal(events[0].detail.workspaces[0].workspaceId, 'ws-1')
+})
+
+await check('工作区移除失败时，提示不会被会话失败的文案顶掉', async () => {
+  const client = makeClient({
+    sessions: SESSIONS,
+    settings: { emptyWorkspaceAction: 'auto' },
+    workspaceRemovalFailed: [{ workspaceId: 'ws-1', error: 'no such workspace', code: 'NOT_FOUND' }],
+  })
+  const original = globalThis.fetch
+  globalThis.fetch = async (url, options = {}) => {
+    if (String(url) === '/__session-recycle/delete-many') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          deleted: [],
+          failed: [{ sessionId: 'session-1', error: '磁盘只读', code: 'REMOVE_FAILED' }],
+          emptiedWorkspaces: [],
+          removedWorkspaces: [],
+          workspaceRemovalFailed: [{ workspaceId: 'ws-1', error: 'no such workspace', code: 'NOT_FOUND' }],
+        }),
+      }
+    }
+    return original(url, options)
+  }
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+  for (const box of boxes(tree)) box.props.onChange()
+  tree = await client.runtime.settle(panel)
+  buttonByText(tree, '删除所选').props.onClick()
+  tree = await client.runtime.settle(panel)
+  await confirmDeleteButton(tree).props.onClick()
+  tree = await client.runtime.settle(panel)
+  globalThis.fetch = original
+  const text = textOf(tree)
+  assert.ok(text.includes('磁盘只读'), `会话失败原因应当保留：${text.slice(-300)}`)
+  assert.ok(text.includes('1 个空工作区移除失败'), `工作区失败原因应当保留：${text.slice(-300)}`)
+})
+
+// --- 6c. empty session folders on disk ---------------------------------------
+
+await check('空目录行显示数量并可一键清理', async () => {
+  const client = makeClient({ emptyDirs: ['--d-a--', '--d-b--'] })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+
+  assert.ok(textOf(tree).includes('当前有 2 个空目录'), `应当显示数量：${textOf(tree).slice(0, 240)}`)
+  const clean = buttonExact(tree, '清理')
+  assert.ok(clean, `缺少清理按钮：${reachable(tree)}`)
+  assert.equal(clean.props.disabled, false)
+
+  await clean.props.onClick()
+  tree = await client.runtime.settle(panel)
+  const posted = client.calls.filter(call => call.path === '/__session-recycle/prune-empty')
+  assert.equal(posted.length, 1, '应当只发一次清理请求')
+  assert.equal(posted[0].method, 'POST')
+  assert.ok(textOf(tree).includes('没有空目录'), `清理后应当归零：${textOf(tree).slice(0, 240)}`)
+})
+
+await check('没有空目录时清理按钮禁用', async () => {
+  const client = makeClient({})
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  assert.ok(textOf(tree).includes('没有空目录'))
+  assert.equal(buttonExact(tree, '清理').props.disabled, true)
 })
 
 // --- 7. client/host contract -------------------------------------------------
