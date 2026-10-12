@@ -62,7 +62,9 @@ window.__ModuleLoader__.load({
       'settings.nav': '会话删除',
       'settings.config': '配置',
       'settings.configTitle': '删除设置',
-      'settings.configDesc': '这里的勾选改完立即生效，关掉即生效完毕。每项标题右侧的 ? 是它的说明，悬浮即显。',
+      // The dialog's own explanation, behind the "?" under its title. It used to
+      // be the description paragraph; nothing here is read without asking for it.
+      'settings.configAbout': '这里的勾选改完立即生效，关掉即生效完毕。',
       'settings.close': '关闭',
       'settings.behaviour': '删除行为',
       // What each switch actually does, behind the "?" next to its title: the
@@ -77,7 +79,6 @@ window.__ModuleLoader__.load({
       'settings.confirmSingleDelete': '删除会话前先确认',
       'settings.confirmSingleDeleteTip1': '开启（默认）：点「删除」先问一次，确认后才真的删。',
       'settings.confirmSingleDeleteTip2': '关闭：点「删除」（单个或所选）直接执行，不再询问。',
-      'settings.confirmForcedHint': '回收站已关闭：删除不可还原，所以始终会先确认。',
       'settings.confirmForcedTip': '这一项暂时不管用：回收站关着，删掉就找不回来了，所以每次都会先确认一次。',
       'settings.autoPrune': '删除后自动清理空分组与空目录',
       // Kept to two lines each at the bubble's 260px: the dialog clips its
@@ -112,7 +113,8 @@ window.__ModuleLoader__.load({
       'settings.cleanedPartial': '已清理 {ok} 个，{fail} 个失败',
       'settings.cleanupNothing': '没有需要清理的空分组或空目录',
       'settings.recycle': '回收站',
-      'settings.recycleHint': '由本插件删除、且仍可还原的会话。',
+      'settings.recycleTip1': '由本插件删除、且仍可还原的会话。',
+      'settings.recycleTip2': '「还原」把它放回会话列表，原来的分组也一并恢复。',
       'settings.loading': '正在读取…',
       'settings.empty': '回收站里没有可还原的会话。',
       'settings.untitled': '未命名会话',
@@ -133,7 +135,9 @@ window.__ModuleLoader__.load({
 
       // 会话列表（本页主体）：直接挑选并删除现存会话，不必先打开某个会话。
       'settings.sessions': '会话列表',
-      'settings.sessionsHint': '勾选后一次删除多个会话。删除后可在回收站还原（回收站关闭时不可还原）。',
+      'settings.sessionsTip1': '勾选后一次删除多个会话。',
+      'settings.sessionsTip2': '删除后可在回收站还原；回收站关闭时不可还原。',
+      'settings.sessionsTip3': '全选作用于整个筛选结果，不只是当前这一页。',
       'settings.filter': '筛选（标题 / 目录 / 序列号）',
       'settings.refresh': '刷新',
       'settings.emptySessions': '没有可删除的会话。',
@@ -187,7 +191,7 @@ window.__ModuleLoader__.load({
       'settings.nav': 'Session deletion',
       'settings.config': 'Settings',
       'settings.configTitle': 'Deletion settings',
-      'settings.configDesc': 'Every tick here applies immediately — just close this when you are done. The "?" beside each title holds that setting\'s explanation: hover it.',
+      'settings.configAbout': 'Every tick here applies immediately — just close this when you are done.',
       'settings.close': 'Close',
       'settings.behaviour': 'Behaviour',
       'settings.tip': 'Explanation',
@@ -198,7 +202,6 @@ window.__ModuleLoader__.load({
       'settings.confirmSingleDelete': 'Confirm before deleting sessions',
       'settings.confirmSingleDeleteTip1': 'On (default): clicking delete asks once, then acts on your confirmation.',
       'settings.confirmSingleDeleteTip2': 'Off: clicking delete — one session or a selection — acts immediately with no confirmation.',
-      'settings.confirmForcedHint': 'The recycle bin is off, so a delete cannot be undone and is always confirmed.',
       'settings.confirmForcedTip': 'This switch is inactive for now: with the bin off a deletion cannot be recovered, so every one of them asks first.',
       'settings.autoPrune': 'Clean up emptied groups and folders after a delete',
       'settings.autoPruneTip1': 'After a delete, is its group now empty?',
@@ -225,7 +228,8 @@ window.__ModuleLoader__.load({
       'settings.cleanedPartial': 'Removed {ok}, {fail} failed',
       'settings.cleanupNothing': 'No empty group or folder to clean',
       'settings.recycle': 'Recycle bin',
-      'settings.recycleHint': 'Sessions this plugin deleted that are still restorable.',
+      'settings.recycleTip1': 'Sessions this plugin deleted that are still restorable.',
+      'settings.recycleTip2': '"Restore" puts one back in the session list, its original group included.',
       'settings.loading': 'Loading…',
       'settings.empty': 'Nothing restorable in the recycle bin.',
       'settings.untitled': 'Untitled session',
@@ -247,7 +251,9 @@ window.__ModuleLoader__.load({
       // Session list (the page's main body): pick live sessions and delete them
       // without opening each one first.
       'settings.sessions': 'Sessions',
-      'settings.sessionsHint': 'Tick several entries to delete them in one go. A deletion lands in the recycle bin and can be restored (unless the bin is off).',
+      'settings.sessionsTip1': 'Tick several entries to delete them in one go.',
+      'settings.sessionsTip2': 'A deletion lands in the recycle bin and can be restored — unless the bin is off.',
+      'settings.sessionsTip3': 'Select-all covers the whole filter result, not just this page.',
       'settings.filter': 'Filter (title / folder / id)',
       'settings.refresh': 'Refresh',
       'settings.emptySessions': 'No sessions to delete.',
@@ -1021,11 +1027,22 @@ window.__ModuleLoader__.load({
     }
     const tabBaseStyle = {
       display: 'inline-flex', alignItems: 'center', gap: 6,
-      padding: '6px 10px', marginBottom: -1, borderRadius: '6px 6px 0 0',
+      padding: '6px 10px', borderRadius: '6px 6px 0 0',
       border: 'none', borderBottom: '2px solid transparent',
       background: 'transparent', cursor: 'pointer',
       fontSize: 13, lineHeight: '20px',
       color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+    }
+    // A tab and its "?" on one line. The negative bottom margin moved here from
+    // the tab itself: the tab's underline has to sit 1px into the strip's own
+    // border, and the wrapper is now what the flex line measures.
+    // `position: relative` is what the tab's "?" hangs its bubble off. Without
+    // it the bubble is placed against the nearest positioned ancestor further
+    // up — measured in the real layout, that put it 116px below the viewport
+    // rather than under the tab it describes.
+    const tabItemStyle = {
+      position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 4,
+      marginBottom: -1,
     }
     /** The open tab: same shape as the idle one, marked rather than disabled. */
     const tabOnStyle = {
@@ -1180,14 +1197,18 @@ window.__ModuleLoader__.load({
       borderColor: 'var(--dsw-alias-interactive-bg-primary, #3b82f6)',
       color: 'var(--dsw-alias-interactive-bg-primary, #3b82f6)',
     }
-    // The bubble always opens *upward*. The dialog clips its overflow (380px
-    // wide, `overflow: hidden`), so the only thing that matters is whether a
-    // bubble clears the card's top edge. Measured in the card's own layout —
-    // 380x422 with the description on two lines — every bubble does, with this
-    // much spare air above it: 82px from the first row, 122 from the second,
-    // 66 from the third (the tallest bubble at 192px), 153 from the last. Below
-    // the last row there is only ~79px, so a bubble opening downward would be
-    // cut at the card's bottom edge.
+    // The bubble opens *upward* by default: inside the settings dialog — 380px
+    // wide, `overflow: hidden` — the only thing that matters is whether a bubble
+    // clears the card's top edge. Measured in that card's own layout, every row
+    // bubble does, with this much spare air above it: 82px from the first row,
+    // 122 from the second, 66 from the third (the tallest bubble at 192px), 153
+    // from the last. Below the last row there is only ~79px, so a bubble opening
+    // downward would be cut at the card's bottom edge.
+    //
+    // Two anchors sit the other way round — the dialog's own explanation, and a
+    // tab strip at the top of a page — where opening up would run the bubble
+    // into the card's header (or the page's own scrolled-out top) instead. Those
+    // pass `placement: 'down'`.
     const tipBoxStyle = {
       position: 'absolute', left: 0, bottom: '100%', zIndex: 30,
       // A fixed 260px, not a percentage: the percentage resolved against the
@@ -1209,10 +1230,19 @@ window.__ModuleLoader__.load({
       textAlign: 'left', whiteSpace: 'normal',
       cursor: 'default',
     }
+    const tipBoxDownStyle = { ...tipBoxStyle, top: '100%', bottom: 'auto' }
     const tipListStyle = {
       margin: 0, padding: '0 0 0 16px', listStyle: 'disc',
     }
     const tipItemStyle = { margin: '2px 0' }
+    // The settings dialog's own explanation: a caption-shaped line holding only
+    // a "?" — the sentence that used to be the description paragraph sits in it.
+    // It is *inside* the card, so it opens downward, into the body.
+    const aboutRowStyle = {
+      position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 6,
+      fontSize: 12, lineHeight: '18px',
+      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+    }
     const dangerOutlineBtnStyle = {
       padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
       border: '1px solid var(--dsw-alias-state-error-primary, #e5484d)',
@@ -1689,6 +1719,14 @@ window.__ModuleLoader__.load({
         ? props.items.filter((item) => typeof item === 'string' && item.length > 0)
         : []
       if (points.length === 0) return null
+      // Which way the bubble opens is the caller's call, because only the caller
+      // knows what is above the anchor: `up` inside the dialog's rows (see
+      // `tipBoxStyle`), `down` for the dialog's own caption and for a tab strip,
+      // where there is no room above.
+      const down = props.placement === 'down'
+      // `说明` alone would be read out three times on a tab strip; naming the
+      // thing it explains makes each chip distinguishable without sight.
+      const described = props.label ? `${__('settings.tip')}：${props.label}` : __('settings.tip')
       return React.createElement('span', {
         style: tipAnchorStyle,
         onMouseEnter: () => setOpen(true),
@@ -1701,7 +1739,7 @@ window.__ModuleLoader__.load({
           tabIndex: 0,
           role: 'button',
           style: open ? tipChipOnStyle : tipChipStyle,
-          'aria-label': __('settings.tip'),
+          'aria-label': described,
           'aria-expanded': open,
           onClick: (event) => {
             event.preventDefault()
@@ -1714,7 +1752,7 @@ window.__ModuleLoader__.load({
           ? React.createElement('span', {
               key: 'tip',
               role: 'tooltip',
-              style: tipBoxStyle,
+              style: down ? tipBoxDownStyle : tipBoxStyle,
               // Selecting text in the bubble must not reach the <label> around
               // the row, or a copy would flip the switch it explains.
               onClick: (event) => { event.preventDefault(); event.stopPropagation() },
@@ -1727,16 +1765,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One settings row: a title with its "?" on the same line, an optional short
-     * note under it, and a checkbox.
+     * One settings row: a title with its "?" on the same line, and a checkbox.
      *
-     * `tip` carries the long explanation and `hint` only what has to be read
-     * without asking — a live count, a warning the row cannot be honoured
-     * without.
+     * `tip` carries every explanation. Nothing sits under the title any more:
+     * the dialog is 380px wide, and a second line of prose under each row was
+     * what pushed the cleanup button onto a line of its own.
      */
     function SettingRow(props) {
       const __ = props.t || t
-      const { label, hint, tip, checked, disabled, onChange } = props
+      const { label, tip, checked, disabled, onChange } = props
       return React.createElement('label', {
         style: {
           display: 'flex', alignItems: 'flex-start', gap: 10,
@@ -1751,11 +1788,12 @@ window.__ModuleLoader__.load({
         React.createElement('span', { key: 'text', style: { display: 'block', minWidth: 0 } }, [
           React.createElement('span', { key: 'title', style: settingLabelRowStyle }, [
             React.createElement('span', { key: 'label', style: settingLabelStyle }, label),
+            // The row carries its "?" and nothing else: any prose that used to
+            // sit under the title is in that bubble now. What may stay is a
+            // *state* — the cleanup row's own count — and that one is not this
+            // component.
             React.createElement(InfoTip, { key: 'tip', items: tip, t: __ }),
           ]),
-          hint
-            ? React.createElement('span', { key: 'hint', style: settingHintStyle }, hint)
-            : null,
         ]),
       ])
     }
@@ -1840,12 +1878,26 @@ window.__ModuleLoader__.load({
               : __('settings.cleanupCount', { dirs: cleanupDirs, workspaces: cleanupGroups }))
       const cleanupOff = cleanup === null || (cleanupDirs === 0 && cleanupGroups === 0)
 
+      // The dialog's own explanation. It used to be the description paragraph,
+      // which is prose sitting in front of the first row; now it is a caption
+      // holding a "?", like every row's own.
+      //
+      // It is not hung off the title itself: `Modal` copies `title` into the
+      // dialog's `aria-label`, so a node there would announce the dialog as
+      // "[object Object]" to a screen reader.
+      const about = React.createElement('span', { key: 'about', style: aboutRowStyle }, [
+        React.createElement('span', { key: 'l' }, __('settings.tip')),
+        React.createElement(InfoTip, {
+          key: 'tip', t: __, placement: 'down', items: [__('settings.configAbout')],
+        }),
+      ])
+
       return React.createElement(Modal, {
         open: true,
         onClose: closeConfigDialog,
         title: __('settings.configTitle'),
         closeLabel: __('settings.close'),
-        description: __('settings.configDesc'),
+        description: about,
         footer: [React.createElement('button', {
           key: 'close', type: 'button', style: confirmBtnStyle, onClick: closeConfigDialog,
         }, __('settings.close'))],
@@ -1872,10 +1924,8 @@ window.__ModuleLoader__.load({
           key: 'confirm',
           label: __('settings.confirmSingleDelete'),
           // With the bin off the switch cannot be honoured — an irreversible
-          // delete is always asked about — so the row says why in place, where
-          // it cannot be missed, instead of letting the user turn it off and
-          // wonder why they were still asked.
-          hint: binOff ? __('settings.confirmForcedHint') : undefined,
+          // delete is always asked about — so the "?" says why, and the warning
+          // right above the row is what makes the state visible without asking.
           tip: binOff
             ? [__('settings.confirmForcedTip')]
             : [__('settings.confirmSingleDeleteTip1'), __('settings.confirmSingleDeleteTip2')],
@@ -2027,12 +2077,29 @@ window.__ModuleLoader__.load({
      *
      * The badge says how much each list is holding — the one number that
      * decides whether crossing over is worth a click.
+     *
+     * Each tab carries its own "?" on the label's right. The explanation used to
+     * be a paragraph under the strip, where it answered "which of the two am I
+     * looking at" only *after* you had already crossed over; on the tab it
+     * answers before, and the strip gets its line back.
      */
     function SettingsTabs(props) {
       const __ = props.__ || t
       const tabs = [
-        { id: TAB_SESSIONS, label: __('settings.sessions') },
-        { id: TAB_RECYCLE, label: __('settings.recycle') },
+        {
+          id: TAB_SESSIONS,
+          label: __('settings.sessions'),
+          tip: [
+            __('settings.sessionsTip1'),
+            __('settings.sessionsTip2'),
+            __('settings.sessionsTip3'),
+          ],
+        },
+        {
+          id: TAB_RECYCLE,
+          label: __('settings.recycle'),
+          tip: [__('settings.recycleTip1'), __('settings.recycleTip2')],
+        },
       ]
       return React.createElement('div', { style: tabStripStyle }, [
         React.createElement('div', {
@@ -2043,23 +2110,31 @@ window.__ModuleLoader__.load({
         }, tabs.map(tab => {
           const count = props.counts?.[tab.id]
           const on = props.tab === tab.id
-          return React.createElement('button', {
-            key: tab.id,
-            type: 'button',
-            role: 'tab',
-            'data-tab': tab.id,
-            'aria-selected': on,
-            style: on ? tabOnStyle : tabBaseStyle,
-            onClick: () => props.onTab?.(tab.id),
-          }, [
-            React.createElement('span', { key: 'l' }, tab.label),
-            // Missing until the pane has a number to give: a badge reading "0"
-            // during the first load would be a claim the client cannot make yet.
-            typeof count === 'number'
-              ? React.createElement('span', {
-                  key: 'n', style: tabBadgeStyle, title: __('settings.tabCount', { n: count }),
-                }, String(count))
-              : null,
+          // The "?" is a *sibling* of the tab button, not a child: a button may
+          // not contain another button, and as a sibling a click on it cannot be
+          // mistaken for a request to switch tabs.
+          return React.createElement('span', { key: tab.id, style: tabItemStyle }, [
+            React.createElement('button', {
+              key: 'tab',
+              type: 'button',
+              role: 'tab',
+              'data-tab': tab.id,
+              'aria-selected': on,
+              style: on ? tabOnStyle : tabBaseStyle,
+              onClick: () => props.onTab?.(tab.id),
+            }, [
+              React.createElement('span', { key: 'l' }, tab.label),
+              // Missing until the pane has a number to give: a badge reading "0"
+              // during the first load would be a claim the client cannot make yet.
+              typeof count === 'number'
+                ? React.createElement('span', {
+                    key: 'n', style: tabBadgeStyle, title: __('settings.tabCount', { n: count }),
+                  }, String(count))
+                : null,
+            ]),
+            React.createElement(InfoTip, {
+              key: 'tip', t: __, placement: 'down', label: tab.label, items: tab.tip,
+            }),
           ])
         })),
         React.createElement('button', {
@@ -2251,21 +2326,18 @@ window.__ModuleLoader__.load({
       // strip (`SettingsTabs`), not in this pane: the bin switch it holds
       // governs the other tab too.
 
-      const hintStyle = { ...metaStyle, margin: '0 0 8px' }
       const binOff = !settingsValue('useRecycleBin')
       const deleteIds = [...picked]
 
       return React.createElement('div', null, [
-        // No heading: the tab right above this line carries the name, and a
-        // title that repeats the tab it sits under is just one more line of
-        // furniture between the user and the first row.
-        React.createElement('div', { key: 'h', style: { ...hintStyle, paddingTop: 8 } },
-          __('settings.sessionsHint')),
-
+        // No heading and no hint: the tab right above this line carries both the
+        // name and — on its "?" — what the page is for, so a paragraph here
+        // would only push the first row down.
+        //
         // Toolbar in two rows: the filter gets the whole first line, and the row
         // under it starts with the select-all box — flush left, in the same
         // column as every row's own checkbox.
-        React.createElement('div', { key: 'filterRow', style: filterRowStyle },
+        React.createElement('div', { key: 'filterRow', style: { ...filterRowStyle, marginTop: 8 } },
           React.createElement('input', {
             type: 'text',
             value: filter,
@@ -2657,14 +2729,9 @@ window.__ModuleLoader__.load({
       const selected = picked.size
 
       return React.createElement('div', null, [
-        // The bin's own hint sits where the session list's does; the tab above
-        // already carries the name, so neither pane repeats its title here.
-        React.createElement('div', { key: 'hint', style: { ...metaStyle, margin: '0 0 8px', paddingTop: 8 } },
-          __('settings.recycleHint')),
-
-        // Two rows, same as the session list's: filter on its own line, then the
-        // select-all box at the far left of the action row.
-        React.createElement('div', { key: 'filterRow', style: filterRowStyle },
+        // Same as the session list: the tab above carries the name, and its "?"
+        // carries what the page is for. Neither pane repeats its title here.
+        React.createElement('div', { key: 'filterRow', style: { ...filterRowStyle, marginTop: 8 } },
           React.createElement('input', {
             type: 'text',
             value: filter,
