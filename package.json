@@ -33,10 +33,14 @@
   },
   "files": [
     "src/",
+    "test/",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],
+  "scripts": {
+    "test": "node test/host.test.mjs"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"

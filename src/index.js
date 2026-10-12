@@ -300,8 +300,18 @@ function forgetRecycled(sessionId) {
  * which is what makes an older row identifiable instead of a bare uuid.
  */
 export function listRecycled() {
+  const store = recycleStoreRoot()
+  const inStore = (payload) => {
+    if (typeof payload !== 'string' || payload.length === 0) return false
+    const resolved = path.resolve(payload)
+    return resolved !== store && resolved.startsWith(store + path.sep)
+  }
   return readRecycleManifest()
     .filter(entry => {
+      // A payload outside the plugin's store is not ours to offer: the
+      // manifest is an unauthenticated JSON file, so a foreign path can appear
+      // in it (hand edit, restored backup, copied from another machine).
+      if (!inStore(entry.payload)) return false
       try { return fs.existsSync(entry.payload) } catch { return false }
     })
     .map(entry => {
@@ -367,6 +377,12 @@ function projectKey(cwd) {
  * confirmed client action. A payload that is already gone is not an error: the
  * user's intent is satisfied, so the ledger entry is dropped either way.
  *
+ * The payload path is re-verified to live inside this plugin's own recycle
+ * store before anything is removed. The manifest is a plain JSON file under
+ * $DSH_HOME — it can be hand-edited, restored from a backup, or carried over
+ * from another machine — and `rm -rf` on whatever it names would otherwise be
+ * an arbitrary delete. A row pointing outside the store is refused.
+ *
  * @returns { sessionId, payloadRemoved: boolean }.
  */
 export async function purgeRecycled(sessionId) {
@@ -375,6 +391,12 @@ export async function purgeRecycled(sessionId) {
   let payloadRemoved = false
   const payload = typeof entry.payload === 'string' ? entry.payload : ''
   if (payload.length > 0) {
+    // The payload must be a directory this plugin owns, inside its own store.
+    const store = recycleStoreRoot()
+    const resolved = path.resolve(payload)
+    if (resolved === store || !resolved.startsWith(store + path.sep)) {
+      throw new SessionRecycleError(`refusing to purge a payload outside the recycle store: ${resolved}`, 'OUT_OF_STORE')
+    }
     try {
       if (fs.existsSync(payload)) {
         // The payload is a directory this plugin owns, so removing it is the
@@ -440,6 +462,16 @@ export async function restoreRecycled(ctx, sessionId) {
     throw new SessionRecycleError(`refusing to restore outside the sessions root: ${dest}`, 'OUT_OF_ROOT')
   }
   if (fs.existsSync(dest)) throw new SessionRecycleError(`restore target already exists: ${dest}`, 'ALREADY_EXISTS')
+
+  // The payload must also live inside this plugin's own recycle store. The
+  // manifest is an unauthenticated JSON file under $DSH_HOME, so a row naming
+  // a foreign directory would otherwise move that directory into the session
+  // store — the same containment rule `purgeRecycled` applies to deletion.
+  const store = recycleStoreRoot()
+  const source = path.resolve(entry.payload)
+  if (source === store || !source.startsWith(store + path.sep)) {
+    throw new SessionRecycleError(`refusing to restore from outside the recycle store: ${source}`, 'OUT_OF_STORE')
+  }
 
   // The payload is on the same volume (both live under DSH_HOME), so putting it
   // back is a rename — no copy, and no second pass to clean up the source.
@@ -1427,7 +1459,7 @@ function registerRoutes(host, ctx) {
         const result = await restoreRecycled(ctx, sessionId)
         sendJson(response, 200, { ok: true, ...result })
       } catch (error) {
-        const status = error?.code === 'NOT_RECYCLED' ? 404 : error?.code === 'INVALID_ID' ? 400 : 500
+        const status = error?.code === 'NOT_RECYCLED' ? 404 : error?.code === 'INVALID_ID' ? 400 : error?.code === 'OUT_OF_STORE' ? 400 : 500
         sendJson(response, status, { ok: false, error: error.message, code: error?.code })
       }
     },
@@ -1466,7 +1498,7 @@ function registerRoutes(host, ctx) {
         const result = await purgeRecycled(sessionId)
         sendJson(response, 200, { ok: true, ...result })
       } catch (error) {
-        const status = error?.code === 'NOT_RECYCLED' ? 404 : 500
+        const status = error?.code === 'NOT_RECYCLED' ? 404 : error?.code === 'OUT_OF_STORE' ? 400 : 500
         sendJson(response, status, { ok: false, error: error.message, code: error?.code })
       }
     },

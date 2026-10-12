@@ -222,12 +222,29 @@ window.__ModuleLoader__.load({
       return 'zh'
     }
 
-    function t(key) {
+    /**
+     * Translate one key, substituting `{name}` placeholders.
+     *
+     * The params argument is NOT optional decoration: the locale tables carry
+     * templates like `'已选 {n} 条'` and `'有 {n} 个工作区…'`, and every
+     * parameterised call site passes the values. Dropping them (an earlier
+     * version of this function took only `key`) left the raw `{n}` / `{name}`
+     * on screen — the count, the workspace name and the batch summaries all
+     * rendered as literal braces.
+     *
+     * The host locale service interpolates when it is given the params
+     * (`translate(ns, key, params)`), so they are forwarded verbatim; the
+     * bundled dictionaries are interpolated locally with the same rule
+     * (unknown names stay untouched, matching the host's behaviour).
+     */
+    function t(key, params) {
       if (localeSvc && typeof localeSvc.translate === 'function') {
-        const text = localeSvc.translate(NS, key)
+        const text = localeSvc.translate(NS, key, params)
         if (typeof text === 'string' && text !== key) return text
       }
-      return (fallbackLang() === 'en' ? en : zh)[key] || key
+      const template = (fallbackLang() === 'en' ? en : zh)[key] || key
+      if (params === undefined || typeof template !== 'string') return template
+      return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
     }
 
     function useLocaleRevision() {
