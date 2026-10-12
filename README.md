@@ -27,47 +27,79 @@ DSH 官方只有「归档」，没有删除。社区插件有，但都是**永�
 - **中文 / English** 双语，跟随 DSH 语言设置
 - **零依赖** —— 不装任何第三方包，无安装脚本
 
-## 安装
+## 安装 / 更新
 
 **把下面这段整段复制，丢给你的 AI**（Claude Code / Cursor / 或 DSH 自己的会话），  
 它会自己完成安装。
 
+> 已经装过的，这段同样用来**更新** —— 它会先把 vendor 副本拉到最新，
+> 再把新代码同步进 `node_modules`。只重新 clone、或只改 `package.json`，
+> DSH 加载的仍是**旧代码**，详见本节末尾「为什么会装成旧版本」。
+
 ```text
-帮我安装 DSH 插件 dsh-session-recycle。
+帮我安装（或更新）DSH 插件 dsh-session-recycle。
 
 仓库：https://github.com/yuchuan000/dsh-session-recycle
 作用：给 DeepSeek Harness 加会话删除（官方只有归档，没有删除），
       删掉的会话进回收站，可以随时还原。
 
-请按以下步骤操作：
+先分清是「首次安装」还是「更新」：<profile>/vendor/dsh-session-recycle
+已经存在就是更新，不要重新 clone。
 
-1. 找到我的 DSH profile 目录。默认是 ~/.dsh/profiles/desktop/
-   （如果我有多个 profile，先问我装到哪个）
+按以下步骤操作，每步做完报告结果，任何一步失败就停下来问我：
 
-2. 克隆仓库到该 profile 下的 vendor/dsh-session-recycle/：
-   git clone https://github.com/yuchuan000/dsh-session-recycle.git <profile>/vendor/dsh-session-recycle
+1. 找到我的 DSH profile 目录。默认 ~/.dsh/profiles/desktop/
+   （Windows 是 C:\Users\<用户名>\.dsh\profiles\desktop；
+    Windows 下 Node 的 process.env.HOME 是空的，别拿 HOME 拼路径）
+   如果有多个 profile，先问我装到哪个。
 
-3. 编辑 <profile>/package.json，做两处修改：
-   a) 在 dependencies 里加一行：
-      "dsh-session-recycle": "file:./vendor/dsh-session-recycle"
-   b) 在 dsh.profile.bundles 数组里加上：
-      "dsh-session-recycle"
+2. 取源码（只走其中一条）
+   首次安装：
+     git clone https://github.com/yuchuan000/dsh-session-recycle.git <profile>/vendor/dsh-session-recycle
+   更新（目录已存在）：
+     cd <profile>/vendor/dsh-session-recycle
+     git status --short     # 有本地改动先报告给我，不要覆盖
+     git pull --ff-only     # 拉不动（有分叉）就停下来问我
+   ⚠️ clone 到已存在的目录会报 "destination path already exists"，
+   那**不是**「已经装好了」，必须走更新这条。
 
-4. 在 <profile>/ 目录下安装依赖：
-   pnpm install
-   （如果我用的不是 pnpm，先问清楚再用对应的包管理器）
+3. 在 <profile>/package.json 里确认两处（已有就跳过，别重复加）
+   a) dependencies: "dsh-session-recycle": "file:./vendor/dsh-session-recycle"
+   b) dsh.profile.bundles 数组里有 "dsh-session-recycle"
+      索引不要照抄：先读数组长度，追加到末尾。
 
-5. 验证安装结果：
-   - <profile>/node_modules/dsh-session-recycle 存在
-   - 它里面的 src/index.js 和 src/client.js 与 vendor/ 里的内容一致
-     （用 hash 对比，比如 sha256sum 或 Get-FileHash）
+4. 重新链接依赖（在 <profile> 目录里）
+   pnpm install           # 本机用 pnpm；不是 pnpm 就先问清楚，别猜
 
-6. 告诉我装好了，并提醒我：**必须重启 DSH 才能生效**。
-   只刷新浏览器页面不够 —— DSH 的客户端插件是在启动时打包的。
+5. 【关键】把新代码同步进 node_modules —— 不做这一步就是旧版本
+   node_modules/dsh-session-recycle 里那份很可能是 pnpm 建的**硬链接副本**：
+   git 更新 vendor 时会换成新文件（新 inode），硬链接随即断开，
+   于是 vendor 是新的、node_modules 还是旧的，而 DSH 加载的正是后者。
+   核对并修复：
+     - 比较 <profile>/vendor/dsh-session-recycle/src/client.js 与
+       <profile>/node_modules/dsh-session-recycle/src/client.js 的 sha256
+     - 不一致就用**覆盖**的方式同步（不要先删再建）：
+         macOS/Linux： cp -f vendor/dsh-session-recycle/src/*.js node_modules/dsh-session-recycle/src/
+         Windows：    copy /Y vendor\dsh-session-recycle\src\*.js node_modules\dsh-session-recycle\src\
+       src/ 下逐个覆盖；package.json 若变了也一起覆盖
+     - 再比一次 hash，必须完全一致
+
+6. 版本核对，把结果报给我
+     git -C <profile>/vendor/dsh-session-recycle log -1 --format='%h %s'
+     git ls-remote https://github.com/yuchuan000/dsh-session-recycle.git HEAD
+   两个 commit 的前 7 位必须一致；不一致说明没拉到最新，回到第 2 步。
+   同时把第 5 步的两个 sha256 报给我。
+
+7. 告诉我装好了，并提醒我：**必须完全退出 DSH 再启动**才生效
+   （只刷新浏览器页面不够 —— 客户端插件在启动时打包；托盘里也要退掉）。
+
+8. 我重启后会看一眼：设置 → 左侧导航出现「会话删除」，图标是**垃圾桶**
+   （不是齿轮），正文第一行是「帮助 ?」。如果图标还是齿轮、或页面里还有
+   大段解释文字，说明旧代码还在生效，回到第 5 步重做同步。
 
 注意：
 - 不要修改我的其他依赖或配置
-- 如果 package.json 已经有 dsh-session-recycle，先告诉我，别重复加
+- 不要删我的 vendor 目录、不要用重新 clone 去覆盖它
 - 如果安装过程中报错，把完整错误贴给我，不要自己猜测性修改
 ```
 
@@ -76,14 +108,24 @@ DSH 官方只有「归档」，没有删除。社区插件有，但都是**永�
 
 <details>
 
-<summary>手动安装（不想用 AI 的话）</summary>
+<summary>手动安装 / 更新（不想用 AI 的话）</summary>
+
+首次安装：
 
 ```sh
 cd ~/.dsh/profiles/<profile>
 git clone https://github.com/yuchuan000/dsh-session-recycle.git vendor/dsh-session-recycle
 ```
 
-然后在 `package.json` 里加两处：
+更新（目录已存在，别重新 clone）：
+
+```sh
+cd ~/.dsh/profiles/<profile>/vendor/dsh-session-recycle
+git status --short          # 有改动先自己处理
+git pull --ff-only
+```
+
+然后在 `<profile>/package.json` 里确认两处：
 
 ```jsonc
 {
@@ -92,15 +134,41 @@ git clone https://github.com/yuchuan000/dsh-session-recycle.git vendor/dsh-sessi
   },
   "dsh": {
     "profile": {
-      "bundles": ["...", "dsh-session-recycle"]
+      "bundles": ["...", "dsh-session-recycle"]   // 追加到末尾，别照抄索引
     }
   }
 }
 ```
 
-再跑 `pnpm install`，然后**重启 DSH**。
+再跑 `pnpm install`，**然后把 `vendor/src/*.js` 覆盖进 `node_modules/dsh-session-recycle/src/`**
+（`cp -f` / `copy /Y`，不要先删再建），最后**重启 DSH**。
 
 </details>
+
+### 为什么会装成旧版本
+
+重装 / 升级时有三个坑，前面那段提示词就是为它们写的：
+
+| 坑 | 现象 |
+|---|---|
+| **`git clone` 到已存在的目录** | 报 `destination path already exists` 就失败了。若把这条当成「已经装好了」，vendor 里那份始终没动过 |
+| **提示词让 AI「已有就别重复加」** | 它看见 `package.json` 里已经有这个依赖，就停手报告「你装过了」—— 配置和代码是两件事，代码没更新 |
+| **`node_modules` 里是硬链接副本** | pnpm 装 `file:` 依赖时把 vendor 的文件**硬链接**进来（`stat -c %i` 看两边 inode 相同）。git 更新 vendor 会写出**新 inode**，链接断开，于是 vendor 是新版、**DSH 实际加载的还是旧文件**。必须覆盖同步 |
+
+判断到底装了哪一版，看两处就够：
+
+```sh
+# 1) vendor 是不是最新的
+git -C <profile>/vendor/dsh-session-recycle log -1 --format='%h %s'
+git ls-remote https://github.com/yuchuan000/dsh-session-recycle.git HEAD   # 两个 sha 前 7 位要一致
+
+# 2) node_modules 那份有没有跟上
+sha256sum <profile>/vendor/dsh-session-recycle/src/client.js \
+          <profile>/node_modules/dsh-session-recycle/src/client.js          # 两个 hash 要一致
+```
+
+界面上的判据同理：导航里那一行的图标是**垃圾桶**才是新版（齿轮是外壳回落出来的
+「通用设置」图标），正文第一行有「**帮助 ?**」才是新版 —— 旧版把说明摊成整段文字。
 
 > **改代码后必须重启 DSH** —— 客户端插件是在启动时打包的，只刷新浏览器页面不够。
 
