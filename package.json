@@ -39,7 +39,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/host.test.mjs"
+    "test": "node test/host.test.mjs && node test/client.test.mjs"
   },
   "dsh": {
     "bundle": {

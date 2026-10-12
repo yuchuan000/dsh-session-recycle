@@ -776,19 +776,53 @@ function describeSession(ctx, sessionId) {
  *
  * @returns the cwd string, or undefined when the header cannot be read.
  */
-function cwdFromArtifact(dir) {
+/**
+ * Decode the session header line (the first zstd frame) to recover the cwd.
+ *
+ * Kept separate from `describeSession` because it touches the recycled payload,
+ * not the live store, and is only needed at list time.
+ *
+ * `budget` caps how much of the file is read. The header frame is one line, so
+ * a listing only ever needs the first few kilobytes; reading whole artifacts to
+ * answer "which project is this" cost ~700 MB of I/O across a 60-session store
+ * on this machine. Callers that need certainty (restore) pass the default and
+ * read everything.
+ *
+ * @returns the parsed header object, or undefined when it cannot be read.
+ */
+function readSessionHeader(dir, budget = Infinity) {
   try {
     const artifact = path.join(dir, 'session.v4.jsonl.zstd')
     if (!fs.existsSync(artifact)) return undefined
-    // Only the first line is needed; zstd frames are independent, so the first
-    // frame decodes on its own.
-    const buf = fs.readFileSync(artifact)
+    const want = budget === Infinity
+      ? fs.statSync(artifact).size
+      : Math.min(fs.statSync(artifact).size, budget)
+    if (want <= 0) return undefined
+    const buf = Buffer.alloc(want)
+    const handle = fs.openSync(artifact, 'r')
+    try {
+      fs.readSync(handle, buf, 0, want, 0)
+    } finally {
+      try { fs.closeSync(handle) } catch { /* best effort */ }
+    }
     const first = zlib.zstdDecompressSync(buf.subarray(0, firstFrameEnd(buf)))
     const line = first.toString('utf8').split('\n')[0]
-    const header = JSON.parse(line)
-    return typeof header.cwd === 'string' ? header.cwd : undefined
+    return JSON.parse(line)
   } catch { return undefined }
 }
+
+function cwdFromArtifact(dir) {
+  const header = readSessionHeader(dir)
+  return typeof header?.cwd === 'string' ? header.cwd : undefined
+}
+
+/**
+ * How much of an artifact the session listing reads to find its header.
+ *
+ * One line of JSON, generously padded: a session whose first frame is larger
+ * than this simply falls back to its project slug, which still identifies it.
+ */
+const HEADER_PREFIX_BYTES = 256 * 1024
 
 /** Byte offset just past the first zstd frame, or the buffer end. */
 function firstFrameEnd(buf) {
@@ -1228,6 +1262,38 @@ function sameOrigin(ctx, request) {
   }
 }
 
+/**
+ * Cap on a batch body.
+ *
+ * A session id is 36 bytes of uuid plus JSON quoting, so 400 of them fit in
+ * ~18 KB. 256 KB is the same ceiling the import plugin uses and leaves room for
+ * the `permanent` flag and future fields; it exists to stop a hostile page from
+ * making the host buffer megabytes before the fence even runs.
+ */
+const MAX_BATCH_BODY_BYTES = 256 * 1024
+
+/**
+ * Cap on ids per batch.
+ *
+ * A store with more live sessions than this is not a store a settings page can
+ * render anyway, and the ceiling keeps one request from making the host do an
+ * unbounded amount of synchronous work in a single tick.
+ */
+const MAX_BATCH_IDS = 5000
+
+/** Normalize a body id list: strings only, trimmed, de-duplicated, capped. */
+function normalizeSessionIds(value) {
+  if (!Array.isArray(value)) return undefined
+  const seen = new Set()
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue
+    const id = entry.trim()
+    if (id.length > 0) seen.add(id)
+    if (seen.size > MAX_BATCH_IDS) throw new Error(`too many ids (max ${MAX_BATCH_IDS})`)
+  }
+  return [...seen]
+}
+
 /** Read a size-capped JSON body. */
 async function readJsonBody(request, maxBytes = 4096) {
   const chunks = []
@@ -1266,10 +1332,25 @@ function registerRoutes(host, ctx) {
         return
       }
       try {
-        sendJson(response, 200, { ok: true, sessions: listStoredSessions().map(entry => ({
-          sessionId: entry.sessionId,
-          slug: entry.cwd,
-        })) })
+        // Title comes from the projection cache (the same source the sidebar
+        // uses) and the cwd from the artifact header; the project slug is the
+        // fallback for either. Without them the settings page could only offer
+        // bare uuids, which is not a list anyone can pick from.
+        sendJson(response, 200, {
+          ok: true,
+          sessions: listStoredSessions().map((entry) => {
+            const described = describeSession(ctx, entry.sessionId)
+            const header = readSessionHeader(entry.dir, HEADER_PREFIX_BYTES)
+            return {
+              sessionId: entry.sessionId,
+              title: described.title ?? '',
+              cwd: typeof header?.cwd === 'string' && header.cwd.length > 0
+                ? header.cwd
+                : (described.slug ?? entry.cwd ?? ''),
+              updatedAt: entry.modifiedAt ?? null,
+            }
+          }),
+        })
       } catch (error) {
         sendJson(response, 500, { ok: false, error: error.message })
       }
@@ -1323,6 +1404,92 @@ function registerRoutes(host, ctx) {
         const status = error?.code === 'INVALID_ID' ? 400 : error?.code === 'NOT_FOUND' ? 404 : 500
         sendJson(response, status, { ok: false, error: error.message, code: error?.code })
       }
+    },
+  }))
+
+  // Batch delete for the settings page's session list.
+  //
+  // The single delete is deliberately per-session — it stops an agent, flushes
+  // a live log and notifies before touching disk — and doing that 20 times over
+  // 20 round-trips is both slow and racy: each call re-reads settings and the
+  // workspace registry, so a workspace emptied by call 3 is already gone by the
+  // time call 7 looks. One route keeps the fence, reads settings once and
+  // aggregates the "this workspace is now empty" offer instead of firing it
+  // twenty times.
+  disposers.push(host.register({
+    kind: 'exact',
+    path: '/__session-recycle/delete-many',
+    handler: async (request, response) => {
+      if (request.method !== 'POST') {
+        sendJson(response, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      // Mutating route: the fence runs before the body is even read.
+      if (!sameOrigin(ctx, request)) {
+        sendJson(response, 403, { ok: false, error: 'untrusted origin' })
+        return
+      }
+      let body
+      try {
+        body = await readJsonBody(request, MAX_BATCH_BODY_BYTES)
+      } catch (error) {
+        sendJson(response, 400, { ok: false, error: `bad request body: ${error.message}` })
+        return
+      }
+      let sessionIds
+      try {
+        sessionIds = normalizeSessionIds(body?.sessionIds)
+      } catch (error) {
+        sendJson(response, 400, { ok: false, error: error.message })
+        return
+      }
+      if (sessionIds === undefined || sessionIds.length === 0) {
+        sendJson(response, 400, { ok: false, error: 'sessionIds is required' })
+        return
+      }
+      if (body?.permanent !== undefined && typeof body.permanent !== 'boolean') {
+        sendJson(response, 400, { ok: false, error: 'permanent must be a boolean' })
+        return
+      }
+      const permanent = body?.permanent === true
+      // Read once and hand it to every call: the policy must not change
+      // mid-batch just because a write landed between two deletions.
+      const settings = readSettings()
+      const deleted = []
+      const failed = []
+      const emptiedById = new Map()
+      for (const sessionId of sessionIds) {
+        try {
+          const result = await deleteSession(ctx, sessionId, { permanent, settings })
+          deleted.push({
+            sessionId,
+            // `result.recycled` is the store-loop log and it records permanent
+            // removals too (`how: 'permanent'`), so "went to the bin" has to be
+            // read off the entry, not off the list being non-empty.
+            recycled: result.recycled.some(entry => entry.how === 'plugin-store'),
+            permanent: result.permanent === true,
+            dirsRemoved: result.dirsRemoved,
+            notified: result.notified === true,
+          })
+          for (const holder of result.emptiedWorkspaces ?? []) {
+            const key = holder?.workspaceId ?? JSON.stringify(holder)
+            if (key !== undefined && key !== '' && !emptiedById.has(key)) {
+              emptiedById.set(key, holder)
+            }
+          }
+        } catch (error) {
+          // One failure must not abort the batch: the user asked for a set, and
+          // reporting which of them survived is more useful than stopping at
+          // the first problem.
+          failed.push({ sessionId, error: error?.message ?? String(error), code: error?.code ?? null })
+        }
+      }
+      sendJson(response, 200, {
+        ok: true,
+        deleted,
+        failed,
+        emptiedWorkspaces: [...emptiedById.values()],
+      })
     },
   }))
 

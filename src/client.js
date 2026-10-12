@@ -22,6 +22,10 @@ window.__ModuleLoader__.load({
     const OVERLAY_SLOT = 'shell.overlay'
     const HEADER_ID = 'session-recycle-header'
     const SETTINGS_ID = 'session-recycle-settings'
+    // The recycle bin is a section of its own so it gets its own nav entry:
+    // restoring is a different task from picking what to delete, and stacking
+    // them on one page made the page long and the two toolbars look alike.
+    const RECYCLE_ID = 'session-recycle-recycled'
     const DIALOG_ID = 'session-recycle-dialog'
     const EMPTY_DIALOG_ID = 'session-recycle-empty-workspace'
     const TOAST_ID = 'session-recycle-toast'
@@ -85,6 +89,29 @@ window.__ModuleLoader__.load({
       'settings.purge': '彻底删除',
       'settings.purged': '已彻底删除 {n} 条，无法恢复。',
       'settings.purgedPartial': '已彻底删除 {ok} 条，{fail} 条失败。',
+
+      // 会话列表（本页主体）：直接挑选并删除现存会话，不必先打开某个会话。
+      'settings.sessions': '会话列表',
+      'settings.sessionsHint': '勾选后一次删除多个会话。删除后可在回收站还原（回收站关闭时不可还原）。',
+      'settings.filter': '筛选（标题 / 目录 / 序列号）',
+      'settings.refresh': '刷新',
+      'settings.selectNone': '取消全选',
+      'settings.emptySessions': '没有可删除的会话。',
+      'settings.filterEmpty': '没有匹配的会话。',
+      'settings.count': '共 {n} 个会话',
+      'settings.deletePicked': '删除所选',
+      'settings.deleting': '正在删除…',
+      'settings.confirmDeleteMany': '确定删除这 {n} 个会话吗？日志会移入回收站，可随时还原。',
+      'settings.confirmDeleteManyPermanent': '⚠ 回收站已关闭：这 {n} 个会话将被永久删除，无法还原。确定继续吗？',
+      'settings.cancel': '取消',
+      'settings.deletedMany': '已删除 {n} 个会话。',
+      'settings.deletedManyPartial': '已删除 {ok} 个，{fail} 个失败。',
+
+      // 回收站已拆成独立标签页，主页面只留一个入口按钮。
+      'settings.recycleNav': '回收站',
+      'settings.openRecycle': '打开回收站',
+      'settings.recycleCount': '回收站：{n} 条待处理',
+      'settings.recycleEmptyCount': '回收站是空的',
     }
 
     const en = {
@@ -140,6 +167,30 @@ window.__ModuleLoader__.load({
       'settings.purge': 'Delete permanently',
       'settings.purged': 'Permanently deleted {n} entry(ies). This cannot be undone.',
       'settings.purgedPartial': 'Permanently deleted {ok}, {fail} failed.',
+
+      // Session list (the page's main body): pick live sessions and delete them
+      // without opening each one first.
+      'settings.sessions': 'Sessions',
+      'settings.sessionsHint': 'Tick several entries to delete them in one go. A deletion lands in the recycle bin and can be restored (unless the bin is off).',
+      'settings.filter': 'Filter (title / folder / id)',
+      'settings.refresh': 'Refresh',
+      'settings.selectNone': 'Select none',
+      'settings.emptySessions': 'No sessions to delete.',
+      'settings.filterEmpty': 'No session matches the filter.',
+      'settings.count': '{n} session(s)',
+      'settings.deletePicked': 'Delete selected',
+      'settings.deleting': 'Deleting…',
+      'settings.confirmDeleteMany': 'Delete these {n} session(s)? Their logs move to the recycle bin and can be restored.',
+      'settings.confirmDeleteManyPermanent': '⚠ The recycle bin is off: these {n} session(s) are deleted permanently and cannot be restored. Continue?',
+      'settings.cancel': 'Cancel',
+      'settings.deletedMany': 'Deleted {n} session(s).',
+      'settings.deletedManyPartial': 'Deleted {ok}, {fail} failed.',
+
+      // The recycle bin is its own tab now; this page only carries the doorway.
+      'settings.recycleNav': 'Recycle bin',
+      'settings.openRecycle': 'Open the recycle bin',
+      'settings.recycleCount': 'Recycle bin: {n} pending',
+      'settings.recycleEmptyCount': 'The recycle bin is empty',
     }
 
     let localeSvc = null
@@ -150,6 +201,9 @@ window.__ModuleLoader__.load({
     let uiWorkspaceSvc = null
     // The client workspace *list* store, so grouping updates can be pushed in.
     let workspacesSvc = null
+    // This plugin's browser context. Held because one section needs to move the
+    // settings panel to another section, and slot access is a context call.
+    let pluginCtx = null
     // Cleanup for DOM-level wiring that cordis does not own (the sidebar menu
     // observer). Run on dispose so a plugin reload leaves nothing behind.
     const sidebarMenuDisposers = []
@@ -405,6 +459,93 @@ window.__ModuleLoader__.load({
     async function fetchRecycled() {
       const payload = await api('/__session-recycle/recycled')
       return Array.isArray(payload.entries) ? payload.entries : []
+    }
+
+    /**
+     * Live sessions in the store, newest first, with display fields.
+     *
+     * The host fills `title` from the projection cache and `cwd` from the
+     * session header, so the row can show what the session *is* rather than a
+     * uuid the user has to decode elsewhere first.
+     */
+    async function fetchSessions() {
+      const payload = await api('/__session-recycle/list')
+      return Array.isArray(payload.sessions) ? payload.sessions : []
+    }
+
+    /**
+     * Delete a set of sessions in one round trip.
+     *
+     * One request rather than N: each single delete re-reads settings and the
+     * workspace registry on the host, so a batch of 20 would both be slow and
+     * race itself — a workspace emptied by the third call is already gone by
+     * the time the seventh looks for it, and the user gets the "this workspace
+     * is empty" offer several times over.
+     *
+     * @returns { deleted, failed, emptiedWorkspaces } from the host.
+     */
+    async function deleteSessions(sessionIds, permanent) {
+      const payload = await api('/__session-recycle/delete-many', {
+        method: 'POST',
+        body: { sessionIds, permanent: permanent === true },
+      })
+      return {
+        deleted: Array.isArray(payload.deleted) ? payload.deleted : [],
+        failed: Array.isArray(payload.failed) ? payload.failed : [],
+        emptiedWorkspaces: Array.isArray(payload.emptiedWorkspaces) ? payload.emptiedWorkspaces : [],
+      }
+    }
+
+    /**
+     * Switch the settings panel to one of this plugin's own sections.
+     *
+     * A `settings.section` entry only receives `close` — the shell owns modal
+     * visibility and navigation, and it exposes no navigation service. The
+     * shell's store, however, is mounted on its own `sidebar.settings` slot
+     * entry (the settings-general package registers it as `store`), and the
+     * shell's `openSection` action lives on the instance that handle creates.
+     * Reaching it through the slot ledger is the supported way in: no DOM, no
+     * private module, and it fails closed (returns false) on a build that
+     * renamed the action, in which case the caller falls back to a nav click.
+     *
+     * @returns whether the panel was asked to switch.
+     */
+    function openSettingsSection(ctx, sectionId) {
+      try {
+        const entries = (typeof ctx?.slots?.entries === 'function' && ctx.slots.entries('sidebar.settings')) || []
+        for (const entry of entries) {
+          const handle = entry?.store
+          if (handle === undefined || handle === null) continue
+          if (typeof handle.create !== 'function') continue
+          const instance = handle.create()
+          const actions = instance && instance.actions
+          if (actions && typeof actions.openSection === 'function') {
+            actions.openSection(sectionId)
+            return true
+          }
+        }
+      } catch { /* fall through to the nav-click fallback */ }
+      return false
+    }
+
+    /**
+     * Last-resort section switch: click the nav cell whose label matches.
+     *
+     * Only reached when the slot-ledger route is unavailable. The nav renders
+     * one button per section, in `order`, and the button's text is exactly the
+     * registered label, so matching on the visible label is stable across the
+     * shell's internals.
+     */
+    function clickSettingsNav(label) {
+      if (typeof document === 'undefined' || typeof label !== 'string' || label.length === 0) return false
+      const panel = document.querySelector('[data-shortcut-modal="settings"]')
+      if (panel === null) return false
+      for (const cell of panel.querySelectorAll('nav button')) {
+        if ((cell.textContent || '').trim() !== label.trim()) continue
+        cell.click()
+        return true
+      }
+      return false
     }
 
     async function restoreSession(sessionId) {
@@ -713,6 +854,82 @@ window.__ModuleLoader__.load({
       color: '#fff', fontSize: 13, cursor: 'pointer',
     }
 
+    // --- pick-list styles -------------------------------------------------------
+    //
+    // Shared by the session list and the recycle list: both are "tick rows,
+    // then act on the ticks", so they are deliberately the same object to look
+    // at. The boxed border is what tells the user the list is a scrollable
+    // area rather than more page text.
+
+    const listBoxStyle = {
+      marginTop: 8, maxHeight: 340, overflowY: 'auto',
+      border: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
+      borderRadius: 8,
+    }
+    const rowBaseStyle = {
+      display: 'flex', alignItems: 'flex-start', gap: 10,
+      padding: '8px 10px',
+    }
+    const rowBorderStyle = {
+      ...rowBaseStyle,
+      borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
+    }
+    const rowTitleStyle = {
+      display: 'block', fontSize: 13, lineHeight: '20px',
+      color: 'var(--dsw-alias-label-primary, inherit)',
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    }
+    const rowMetaStyle = {
+      display: 'block', fontSize: 12, lineHeight: '18px',
+      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    }
+    const toolbarStyle = {
+      display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8,
+      padding: '6px 0 8px',
+      borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
+    }
+    const filterInputStyle = {
+      flex: '1 1 180px', minWidth: 140, padding: '5px 10px',
+      fontSize: 12, borderRadius: 8,
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+      background: 'transparent', color: 'var(--dsw-alias-label-primary, inherit)',
+    }
+    const ghostBtnStyle = {
+      padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
+      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+      background: 'transparent', color: 'var(--dsw-alias-label-primary, inherit)',
+    }
+    const ghostBtnOffStyle = { ...ghostBtnStyle, opacity: 0.5, cursor: 'default' }
+    const dangerOutlineBtnStyle = {
+      padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
+      border: '1px solid var(--dsw-alias-state-error-primary, #e5484d)',
+      background: 'transparent', color: 'var(--dsw-alias-state-error-primary, #e5484d)',
+    }
+    const dangerOutlineBtnOffStyle = { ...dangerOutlineBtnStyle, opacity: 0.5, cursor: 'default' }
+
+    /**
+     * Format a millisecond timestamp for a row's meta line.
+     *
+     * @returns the local string, or '' when there is nothing to show.
+     */
+    function formatWhen(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return ''
+      try { return new Date(value).toLocaleString() } catch { return '' }
+    }
+
+    /**
+     * Shorten a project path to its last two segments.
+     *
+     * The full path is kept in the `title` attribute: the tail identifies the
+     * project, the head only tells the user which drive it is on.
+     */
+    function shortPath(value) {
+      if (typeof value !== 'string' || value.length === 0) return ''
+      const parts = value.split(/[\\/]+/).filter(Boolean)
+      return parts.slice(-2).join('/')
+    }
+
     // --- dialog -----------------------------------------------------------------
 
     /**
@@ -969,39 +1186,58 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The settings section plus the recycle bin.
+     * The main settings section: the deletion policy, the live session list,
+     * and the doorway to the recycle bin.
      *
-     * Registered into `settings.section`, so it appears with the harness's own
-     * settings pages. The recycle list lives here rather than in its own slot:
-     * restore is rare and belongs next to the policy that produced it.
+     * Registered into `settings.section`. The list is the reason this page
+     * exists: before it the only way to delete a session was to find its row in
+     * the sidebar and open its menu, once per session. Here the whole store is
+     * on screen at once, so a cleanup is tick-tick-tick-delete instead of a
+     * hunt.
+     *
+     * The recycle bin used to share this page and now has its own section
+     * (`RECYCLE_ID`). The two tasks have nothing in common past the verb — this
+     * page is about choosing what to remove, that one about undoing a removal —
+     * and stacking them produced two nearly identical toolbars on one page,
+     * which is a good way to press the wrong one.
      */
     function SettingsPanel(props) {
       const __ = (props && props.t) || t
       useLocaleRevision()
       const [, forceRender] = useState(0)
-      const [entries, setEntries] = useState([])
+      const [sessions, setSessions] = useState([])
       const [loading, setLoading] = useState(true)
-      const [busyId, setBusyId] = useState(null)
       const [error, setError] = useState(null)
-      const [note, setNote] = useState(null)
-      // Recycle-bin selection for batch permanent delete.
+      const [filter, setFilter] = useState('')
       const [picked, setPicked] = useState(() => new Set())
-      const [purging, setPurging] = useState(false)
+      const [confirming, setConfirming] = useState(false)
+      const [busy, setBusy] = useState(false)
+      // The recycle count only feeds the doorway button's label, so a failed
+      // read leaves it blank instead of raising an error on this page.
+      const [recycledCount, setRecycledCount] = useState(null)
 
       useEffect(() => settingsSubscribe(() => forceRender(n => n + 1)), [])
 
       /**
-       * Re-read the recycle list.
+       * Re-read the store's session list.
        *
-       * @param quiet - skip the loading flag. A restore or purge is followed by
-       *   a re-read, and raising `loading` there blanks the whole list (the
-       *   panel renders the loading line instead of the rows) so the entries
-       *   visibly vanish and come back. Only the first load needs that state.
+       * @param quiet - skip the loading flag. A delete is followed by a re-read
+       *   and raising `loading` there blanks the list, so the rows visibly
+       *   vanish and come back. Only the first load needs that state.
        */
       const refresh = useCallback(async (quiet = false) => {
         if (!quiet) setLoading(true)
         try {
-          setEntries(await fetchRecycled())
+          const rows = await fetchSessions()
+          setSessions(rows)
+          // Drop ticks for sessions that are gone. Keeping them would let the
+          // delete button act on ids the list no longer shows, and the "n
+          // selected" count would stop matching what is on screen.
+          const alive = new Set(rows.map(row => row.sessionId))
+          setPicked((prev) => {
+            const next = new Set([...prev].filter(id => alive.has(id)))
+            return next.size === prev.size ? prev : next
+          })
           setError(null)
         } catch (reason) {
           setError(reason?.message ?? String(reason))
@@ -1011,118 +1247,37 @@ window.__ModuleLoader__.load({
 
       useEffect(() => { refresh() }, [refresh])
 
-      const onRestore = useCallback(async (sessionId) => {
-        setBusyId(sessionId)
-        setError(null)
-        setNote(null)
-        try {
-          const restored = await restoreSession(sessionId)
-          // The log is back on disk; pull the session list NOW, in parallel with
-          // the recycle-panel re-read, since the two are independent and the
-          // sidebar is what the user is watching.
-          const listed = resyncSessionList(sessionId)
-          await refresh(true)
-          await resyncWorkspaces()
-          await listed
-          // Report upward as a banner: the settings panel may be scrolled away
-          // from the recycle list, and feedback the user has to hunt for is not
-          // feedback.
-          showToast(
-            restored.regrouped === true
-              ? __('settings.restoredGrouped', { name: restored.workspaceTitle || '' })
-              : __('settings.restored'),
-            'success',
-          )
-        } catch (reason) {
-          setError(reason?.message ?? String(reason))
-        }
-        setBusyId(null)
-      }, [refresh, __])
+      useEffect(() => {
+        let cancelled = false
+        fetchRecycled()
+          .then((rows) => { if (!cancelled) setRecycledCount(rows.length) })
+          .catch(() => { if (!cancelled) setRecycledCount(null) })
+        return () => { cancelled = true }
+      }, [])
 
-      /**
-       * Restore every picked entry.
-       *
-       * For a restore the order does not matter, so this can run them in
-       * sequence and report one banner at the end. The sidebar and grouping are
-       * refreshed once afterwards rather than per entry, so the list settles
-       * exactly once no matter how many rows were chosen.
-       */
-      const onRestorePicked = useCallback(async () => {
-        const ids = [...picked]
-        if (ids.length === 0) return
-        setPurging(true)
-        setError(null)
-        setNote(null)
-        let restored = 0
-        let grouped = 0
-        const failures = []
-        for (const sessionId of ids) {
-          try {
-            const res = await restoreSession(sessionId)
-            restored += 1
-            if (res.regrouped === true) grouped += 1
-          } catch (reason) {
-            failures.push(`${sessionId}: ${reason?.message ?? reason}`)
-          }
-        }
-        setPurging(false)
-        setPicked(new Set())
-        // Settle the lists once, after every entry has been written back, and
-        // start the session pull in parallel with the panel re-read.
-        if (restored > 0) {
-          const listed = resyncSessionList(ids[ids.length - 1])
-          await refresh(true)
-          await resyncWorkspaces()
-          await listed
-        } else {
-          await refresh(true)
-        }
-        showToast(
-          failures.length === 0
-            ? __('settings.restoredMany', { n: restored, g: grouped })
-            : __('settings.restoredManyPartial', { ok: restored, fail: failures.length }),
-          'success',
-        )
-        if (failures.length > 0) setError(failures.slice(0, 5).join('\n'))
-      }, [picked, refresh, __])
+      const needle = filter.trim().toLowerCase()
+      const visible = needle.length === 0
+        ? sessions
+        : sessions.filter(row => (
+            String(row.title || '').toLowerCase().includes(needle)
+            || String(row.cwd || '').toLowerCase().includes(needle)
+            || String(row.sessionId || '').toLowerCase().includes(needle)
+          ))
 
-      /**
-       * Permanently delete the picked entries.
-       *
-       * This is the second half of the recycle bin: an entry that is no longer
-       * wanted can be dropped for good, which also empties the OS bin payload
-       * so the disk space comes back. It is irreversible, so it is always a
-       * deliberate, confirmed action and never a side effect of anything else.
-       */
-      const onPurge = useCallback(async () => {
-        const ids = [...picked]
-        if (ids.length === 0) return
-        setPurging(true)
-        setError(null)
-        setNote(null)
-        let gone = 0
-        const failures = []
-        for (const sessionId of ids) {
-          try {
-            await purgeRecycled(sessionId)
-            gone += 1
-          } catch (reason) {
-            // Already absent counts as done: the entry is gone either way.
-            if (/nothing recycled|NOT_RECYCLED/i.test(String(reason?.message ?? reason))) gone += 1
-            else failures.push(`${sessionId}: ${reason?.message ?? reason}`)
+      const visiblePicked = visible.filter(row => picked.has(row.sessionId)).length
+      const allVisiblePicked = visible.length > 0 && visiblePicked === visible.length
+
+      const toggleAllVisible = useCallback(() => {
+        setPicked((prev) => {
+          const next = new Set(prev)
+          if (visible.every(row => next.has(row.sessionId))) {
+            for (const row of visible) next.delete(row.sessionId)
+          } else {
+            for (const row of visible) next.add(row.sessionId)
           }
-        }
-        setPurging(false)
-        setPicked(new Set())
-        await refresh(true)
-        showToast(
-          failures.length === 0
-            ? __('settings.purged', { n: gone })
-            : __('settings.purgedPartial', { ok: gone, fail: failures.length }),
-          'success',
-        )
-        if (failures.length > 0) setError(failures.slice(0, 5).join('\n'))
-      }, [picked, refresh, __])
+          return next
+        })
+      }, [visible])
 
       const togglePick = useCallback((sessionId) => {
         setPicked((prev) => {
@@ -1131,19 +1286,64 @@ window.__ModuleLoader__.load({
           else next.add(sessionId)
           return next
         })
+        setConfirming(false)
       }, [])
 
-      const allPicked = entries.length > 0 && entries.every(e => picked.has(e.sessionId))
-      const toggleAll = useCallback(() => {
-        setPicked((prev) => (entries.every(e => prev.has(e.sessionId))
-          ? new Set()
-          : new Set(entries.map(e => e.sessionId))))
-      }, [entries])
+      /**
+       * Delete every ticked session.
+       *
+       * One host round trip for the whole set (see `deleteSessions`), then the
+       * three surfaces that showed the dead sessions are told to settle: this
+       * list, the sidebar, and the conversation pane when it held one of them.
+       * The emptied-workspace offer is raised afterwards, by a tick, so it
+       * cannot race the settings modal for the overlay.
+       */
+      const onDelete = useCallback(async () => {
+        const ids = [...picked]
+        if (ids.length === 0) return
+        setBusy(true)
+        setError(null)
+        // Which of the batch, if any, is the open conversation. The pane has to
+        // be cleared off *that* id — handing `refreshSidebar` the first id in
+        // the set would leave the pane showing a session that no longer exists
+        // whenever the user was reading the third one.
+        const current = currentSessionId()
+        const deadCurrent = current !== undefined && ids.some(id => String(id) === String(current))
+        try {
+          const result = await deleteSessions(ids, !settingsValue('useRecycleBin'))
+          setConfirming(false)
+          setPicked(new Set())
+          await refresh(true)
+          offerEmptyWorkspaceCleanup(result.emptiedWorkspaces)
+          refreshSidebar(deadCurrent ? String(current) : ids[0], deadCurrent)
+          showToast(
+            result.failed.length === 0
+              ? __('settings.deletedMany', { n: result.deleted.length })
+              : __('settings.deletedManyPartial', { ok: result.deleted.length, fail: result.failed.length }),
+            'success',
+          )
+          if (result.failed.length > 0) {
+            setError(result.failed.slice(0, 5).map(f => `${f.sessionId}: ${f.error}`).join('\n'))
+          }
+        } catch (reason) {
+          setError(reason?.message ?? String(reason))
+        }
+        setBusy(false)
+      }, [picked, refresh, __])
 
-      const sectionStyle = { padding: '4px 0 8px' }
+      const onOpenRecycle = useCallback(() => {
+        // The shell's own action first; a build that renamed it still works
+        // through the nav click.
+        if (openSettingsSection(pluginCtx, RECYCLE_ID)) return
+        clickSettingsNav(__('settings.recycleNav'))
+      }, [__])
+
       const headingStyle = { fontSize: 13, fontWeight: 600, margin: '14px 0 2px' }
+      const hintStyle = { ...metaStyle, margin: '0 0 8px' }
+      const binOff = !settingsValue('useRecycleBin')
+      const deleteIds = [...picked]
 
-      return React.createElement('div', { style: sectionStyle }, [
+      return React.createElement('div', { style: { padding: '4px 0 8px' } }, [
         React.createElement('div', { key: 'h1', style: headingStyle }, __('settings.behaviour')),
         React.createElement(SettingRow, {
           key: 'confirm',
@@ -1166,93 +1366,415 @@ window.__ModuleLoader__.load({
           checked: settingsValue('useRecycleBin'),
           onChange: (value) => updateSetting('useRecycleBin', value),
         }),
-        settingsValue('useRecycleBin')
-          ? null
-          : React.createElement('div', {
-              key: 'binwarn',
-              style: { ...errStyle, marginTop: 6 },
-            }, __('settings.binOffWarning')),
+        binOff
+          ? React.createElement('div', { key: 'binwarn', style: { ...errStyle, marginTop: 6 } },
+              __('settings.binOffWarning'))
+          : null,
 
-        React.createElement('div', { key: 'h2', style: headingStyle }, __('settings.recycle')),
-        React.createElement('div', {
-          key: 'hint',
-          style: {
-            fontSize: 12, lineHeight: '18px', marginBottom: 6,
-            color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
-          },
-        }, __('settings.recycleHint')),
+        React.createElement('div', { key: 'h2', style: headingStyle }, __('settings.sessions')),
+        React.createElement('div', { key: 'shint', style: hintStyle }, __('settings.sessionsHint')),
+
+        // Toolbar: filter, select helpers, refresh, and the one destructive verb.
+        React.createElement('div', { key: 'bar', style: toolbarStyle }, [
+          React.createElement('input', {
+            key: 'filter',
+            type: 'text',
+            value: filter,
+            placeholder: __('settings.filter'),
+            onChange: (event) => setFilter(event.target.value),
+            style: filterInputStyle,
+            'aria-label': __('settings.filter'),
+          }),
+          React.createElement('button', {
+            key: 'all',
+            type: 'button',
+            style: visible.length === 0 ? ghostBtnOffStyle : ghostBtnStyle,
+            disabled: visible.length === 0,
+            onClick: toggleAllVisible,
+          }, allVisiblePicked ? __('settings.selectNone') : __('settings.selectAll')),
+          React.createElement('button', {
+            key: 'refresh',
+            type: 'button',
+            style: loading || busy ? ghostBtnOffStyle : ghostBtnStyle,
+            disabled: loading || busy,
+            onClick: () => refresh(),
+          }, __('settings.refresh')),
+          React.createElement('button', {
+            key: 'delete',
+            type: 'button',
+            style: deleteIds.length === 0 || busy ? dangerOutlineBtnOffStyle : dangerOutlineBtnStyle,
+            disabled: deleteIds.length === 0 || busy,
+            onClick: () => setConfirming(true),
+          }, busy ? __('settings.deleting') : __('settings.deletePicked')),
+        ]),
+
+        React.createElement('div', { key: 'count', style: { ...metaStyle, margin: '2px 0 0' } },
+          __('settings.count', { n: sessions.length })),
+
+        // Inline confirmation rather than a second modal: the user is already
+        // inside one, and a modal on a modal is what makes a settings page feel
+        // like a maze. It renders next to the button that raised it, so the
+        // answer stays with the question.
+        confirming && deleteIds.length > 0
+          ? React.createElement('div', {
+              key: 'confirm',
+              style: {
+                display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8,
+                marginTop: 8, padding: '8px 10px', borderRadius: 8,
+                border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
+              },
+            }, [
+              React.createElement('span', {
+                key: 'text',
+                style: {
+                  flex: '1 1 220px', fontSize: 12, lineHeight: '18px',
+                  color: binOff
+                    ? 'var(--dsw-alias-state-error-primary, #e5484d)'
+                    : 'var(--dsw-alias-label-primary, inherit)',
+                },
+              }, binOff
+                ? __('settings.confirmDeleteManyPermanent', { n: deleteIds.length })
+                : __('settings.confirmDeleteMany', { n: deleteIds.length })),
+              React.createElement('button', {
+                key: 'cancel', type: 'button', style: ghostBtnStyle,
+                disabled: busy, onClick: () => setConfirming(false),
+              }, __('settings.cancel')),
+              React.createElement('button', {
+                key: 'go', type: 'button',
+                style: busy ? dangerOutlineBtnOffStyle : dangerOutlineBtnStyle,
+                disabled: busy, onClick: onDelete,
+              }, busy ? __('settings.deleting') : __('settings.deletePicked')),
+            ])
+          : null,
 
         loading
-          ? React.createElement('div', { key: 'loading', style: { ...metaStyle, fontSize: 12 } }, __('settings.loading'))
-          : entries.length === 0
-            ? React.createElement('div', { key: 'none', style: { ...metaStyle, fontSize: 12 } }, __('settings.empty'))
-            : React.createElement(React.Fragment, null, [
-                // Toolbar: select-all plus the batch permanent delete.
-                React.createElement('div', {
-                  key: 'bar',
-                  style: {
-                    display: 'flex', alignItems: 'center', gap: 10,
-                    padding: '6px 0 8px', fontSize: 12,
-                    borderBottom: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
-                  },
-                }, [
-                  React.createElement('label', {
-                    key: 'all',
-                    style: { display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' },
-                  }, [
-                    React.createElement('input', {
-                      key: 'box', type: 'checkbox', checked: allPicked,
-                      onChange: toggleAll,
-                    }),
-                    React.createElement('span', { key: 'lbl' }, __('settings.selectAll')),
-                  ]),
-                  React.createElement('span', {
-                    key: 'count', style: { color: 'var(--dsw-alias-label-secondary, #8a8a8e)' },
-                  }, __('batch.selected', { n: picked.size })),
-                  React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
-                  React.createElement('button', {
-                    key: 'restore',
-                    type: 'button',
-                    disabled: picked.size === 0 || purging,
-                    onClick: onRestorePicked,
-                    style: {
-                      padding: '4px 12px', borderRadius: 6, fontSize: 12,
-                      cursor: picked.size === 0 || purging ? 'default' : 'pointer',
-                      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
-                      background: 'transparent',
-                      color: 'var(--dsw-alias-label-primary, inherit)',
-                      ...(picked.size === 0 || purging ? { opacity: 0.5 } : {}),
-                    },
-                  }, purging ? __('dialog.busy') : __('settings.restorePicked')),
-                  React.createElement('button', {
-                    key: 'purge',
-                    type: 'button',
-                    disabled: picked.size === 0 || purging,
-                    onClick: onPurge,
-                    style: {
-                      padding: '4px 12px', borderRadius: 6, fontSize: 12,
-                      cursor: picked.size === 0 || purging ? 'default' : 'pointer',
-                      border: '1px solid var(--dsw-alias-state-error-primary, #e5484d)',
-                      background: 'transparent',
-                      color: 'var(--dsw-alias-state-error-primary, #e5484d)',
-                      ...(picked.size === 0 || purging ? { opacity: 0.5 } : {}),
-                    },
-                  }, purging ? __('dialog.busy') : __('settings.purge')),
-                ]),
-                React.createElement('div', {
-                  key: 'list', style: { maxHeight: 320, overflowY: 'auto' },
-                }, entries.map(entry => React.createElement(RecycleRow, {
+          ? React.createElement('div', { key: 'loading', style: { ...metaStyle, marginTop: 10 } },
+              __('settings.loading'))
+          : visible.length === 0
+            ? React.createElement('div', { key: 'none', style: { ...metaStyle, marginTop: 10 } },
+                sessions.length === 0 ? __('settings.emptySessions') : __('settings.filterEmpty'))
+            : React.createElement('div', { key: 'list', style: listBoxStyle },
+                visible.map((session, index) => React.createElement(SessionRow, {
+                  key: session.sessionId,
+                  session,
+                  border: index > 0,
+                  busy,
+                  picked: picked.has(session.sessionId),
+                  onTogglePick: togglePick,
+                }))),
+
+        // Doorway to the recycle bin. It is a section of its own; this page only
+        // needs to say it exists and how much is waiting there.
+        React.createElement('div', { key: 'h3', style: headingStyle }, __('settings.recycle')),
+        React.createElement('div', { key: 'rrow', style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } }, [
+          React.createElement('button', {
+            key: 'open', type: 'button', style: ghostBtnStyle, onClick: onOpenRecycle,
+          }, __('settings.openRecycle')),
+          React.createElement('span', {
+            key: 'n', style: { ...metaStyle, margin: 0 },
+          }, recycledCount === null
+            ? ''
+            : recycledCount === 0
+              ? __('settings.recycleEmptyCount')
+              : __('settings.recycleCount', { n: recycledCount })),
+        ]),
+
+        error ? React.createElement('div', {
+          key: 'err', role: 'alert', style: { ...errStyle, whiteSpace: 'pre-wrap' },
+        }, error) : null,
+      ])
+    }
+
+    /**
+     * One row of the session list.
+     *
+     * Deliberately the same shape as the import page's rows — checkbox, title,
+     * meta line — so the two pick-lists in this app read as one pattern rather
+     * than two. The row is a `label`, so the whole row is the hit target and
+     * only the checkbox has to be aimed at.
+     *
+     * The id is the title's fallback, not its companion: a uuid under every row
+     * is noise, and the host already resolves the title from the same
+     * projection cache the sidebar uses.
+     */
+    function SessionRow(props) {
+      const { session, busy } = props
+      const title = (session.title && String(session.title).trim()) || session.sessionId
+      const cwd = typeof session.cwd === 'string' ? session.cwd : ''
+      const when = formatWhen(session.updatedAt)
+      const meta = [shortPath(cwd), when].filter(part => part.length > 0).join(' · ')
+
+      return React.createElement('label', {
+        style: props.border === true ? rowBorderStyle : rowBaseStyle,
+      }, [
+        React.createElement('input', {
+          key: 'box',
+          type: 'checkbox',
+          checked: props.picked === true,
+          disabled: busy === true,
+          onChange: () => props.onTogglePick?.(session.sessionId),
+          style: { marginTop: 3, flex: 'none' },
+        }),
+        React.createElement('span', { key: 'text', style: { flex: 1, minWidth: 0 } }, [
+          React.createElement('span', { key: 't', style: rowTitleStyle, title }, title),
+          React.createElement('span', { key: 'm', style: rowMetaStyle, title: cwd || meta }, meta),
+        ]),
+      ])
+    }
+
+    /**
+     * The recycle bin, as its own settings section.
+     *
+     * Same pick-list shape as the session list: tick rows, then restore or purge
+     * them. Entries are sessions this plugin deleted and still holds payloads
+     * for; an entry whose payload went missing is listed anyway, because a row
+     * that cannot be restored is better news than one that silently vanished.
+     */
+    function RecyclePanel(props) {
+      const __ = (props && props.t) || t
+      useLocaleRevision()
+      const [entries, setEntries] = useState([])
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState(null)
+      const [busyId, setBusyId] = useState(null)
+      const [filter, setFilter] = useState('')
+      const [picked, setPicked] = useState(() => new Set())
+      const [busy, setBusy] = useState(false)
+
+      /**
+       * Re-read the recycle list.
+       *
+       * @param quiet - skip the loading flag, for the same reason as the session
+       *   list: a restore is followed by a re-read and raising `loading` there
+       *   blanks the list the user is watching.
+       */
+      const refresh = useCallback(async (quiet = false) => {
+        if (!quiet) setLoading(true)
+        try {
+          const rows = await fetchRecycled()
+          setEntries(rows)
+          const alive = new Set(rows.map(row => row.sessionId))
+          setPicked((prev) => {
+            const next = new Set([...prev].filter(id => alive.has(id)))
+            return next.size === prev.size ? prev : next
+          })
+          setError(null)
+        } catch (reason) {
+          setError(reason?.message ?? String(reason))
+        }
+        if (!quiet) setLoading(false)
+      }, [])
+
+      useEffect(() => { refresh() }, [refresh])
+
+      const onRestore = useCallback(async (sessionId) => {
+        setBusyId(sessionId)
+        setError(null)
+        try {
+          const restored = await restoreSession(sessionId)
+          // The log is back on disk; start the sidebar pull in parallel with the
+          // recycle re-read, since the two are independent and the sidebar is
+          // what the user is watching.
+          const listed = resyncSessionList(sessionId)
+          await refresh(true)
+          await resyncWorkspaces()
+          await listed
+          // Reported as a banner: this page can be scrolled away from the row,
+          // and feedback the user has to hunt for is not feedback.
+          showToast(
+            restored.regrouped === true
+              ? __('settings.restoredGrouped', { name: restored.workspaceTitle || '' })
+              : __('settings.restored'),
+            'success',
+          )
+        } catch (reason) {
+          setError(reason?.message ?? String(reason))
+        }
+        setBusyId(null)
+      }, [refresh, __])
+
+      const togglePick = useCallback((sessionId) => {
+        setPicked((prev) => {
+          const next = new Set(prev)
+          if (next.has(sessionId)) next.delete(sessionId)
+          else next.add(sessionId)
+          return next
+        })
+      }, [])
+
+      /**
+       * Restore every ticked entry.
+       *
+       * Order does not matter for a restore, so they run in sequence and report
+       * one banner at the end; the sidebar and the grouping are settled once
+       * afterwards rather than per entry, so the list stops moving exactly once
+       * no matter how many rows were chosen.
+       */
+      const onRestorePicked = useCallback(async () => {
+        const ids = [...picked]
+        if (ids.length === 0) return
+        setBusy(true)
+        setError(null)
+        let restored = 0
+        let grouped = 0
+        const failures = []
+        for (const sessionId of ids) {
+          try {
+            const res = await restoreSession(sessionId)
+            restored += 1
+            if (res.regrouped === true) grouped += 1
+          } catch (reason) {
+            failures.push(`${sessionId}: ${reason?.message ?? reason}`)
+          }
+        }
+        setBusy(false)
+        setPicked(new Set())
+        if (restored > 0) {
+          const listed = resyncSessionList(ids[ids.length - 1])
+          await refresh(true)
+          await resyncWorkspaces()
+          await listed
+        } else {
+          await refresh(true)
+        }
+        showToast(
+          failures.length === 0
+            ? __('settings.restoredMany', { n: restored, g: grouped })
+            : __('settings.restoredManyPartial', { ok: restored, fail: failures.length }),
+          'success',
+        )
+        if (failures.length > 0) setError(failures.slice(0, 5).join('\n'))
+      }, [picked, refresh, __])
+
+      /**
+       * Permanently delete the ticked entries.
+       *
+       * The second half of the bin: an entry nobody wants back can be dropped
+       * for good, which also frees the payload on disk. Irreversible, so it is
+       * always a deliberate action and never a side effect of anything else.
+       */
+      const onPurge = useCallback(async () => {
+        const ids = [...picked]
+        if (ids.length === 0) return
+        setBusy(true)
+        setError(null)
+        let gone = 0
+        const failures = []
+        for (const sessionId of ids) {
+          try {
+            await purgeRecycled(sessionId)
+            gone += 1
+          } catch (reason) {
+            // Already absent counts as done: the entry is gone either way.
+            if (/nothing recycled|NOT_RECYCLED/i.test(String(reason?.message ?? reason))) gone += 1
+            else failures.push(`${sessionId}: ${reason?.message ?? reason}`)
+          }
+        }
+        setBusy(false)
+        setPicked(new Set())
+        await refresh(true)
+        showToast(
+          failures.length === 0
+            ? __('settings.purged', { n: gone })
+            : __('settings.purgedPartial', { ok: gone, fail: failures.length }),
+          'success',
+        )
+        if (failures.length > 0) setError(failures.slice(0, 5).join('\n'))
+      }, [picked, refresh, __])
+
+      const needle = filter.trim().toLowerCase()
+      const visible = needle.length === 0
+        ? entries
+        : entries.filter(entry => (
+            String(entry.title || entry.label || '').toLowerCase().includes(needle)
+            || String(entry.cwd || '').toLowerCase().includes(needle)
+            || String(entry.sessionId || '').toLowerCase().includes(needle)
+          ))
+
+      const visiblePicked = visible.filter(entry => picked.has(entry.sessionId)).length
+      const allVisiblePicked = visible.length > 0 && visiblePicked === visible.length
+      const toggleAllVisible = useCallback(() => {
+        setPicked((prev) => {
+          const next = new Set(prev)
+          if (visible.every(entry => next.has(entry.sessionId))) {
+            for (const entry of visible) next.delete(entry.sessionId)
+          } else {
+            for (const entry of visible) next.add(entry.sessionId)
+          }
+          return next
+        })
+      }, [visible])
+
+      const headingStyle = { fontSize: 13, fontWeight: 600, margin: '0 0 4px' }
+      const selected = picked.size
+
+      return React.createElement('div', { style: { padding: '4px 0 8px' } }, [
+        React.createElement('div', { key: 'h', style: headingStyle }, __('settings.recycle')),
+        React.createElement('div', { key: 'hint', style: { ...metaStyle, margin: '0 0 8px' } },
+          __('settings.recycleHint')),
+
+        React.createElement('div', { key: 'bar', style: toolbarStyle }, [
+          React.createElement('input', {
+            key: 'filter',
+            type: 'text',
+            value: filter,
+            placeholder: __('settings.filter'),
+            onChange: (event) => setFilter(event.target.value),
+            style: filterInputStyle,
+            'aria-label': __('settings.filter'),
+          }),
+          React.createElement('button', {
+            key: 'all',
+            type: 'button',
+            style: visible.length === 0 ? ghostBtnOffStyle : ghostBtnStyle,
+            disabled: visible.length === 0,
+            onClick: toggleAllVisible,
+          }, allVisiblePicked ? __('settings.selectNone') : __('settings.selectAll')),
+          React.createElement('span', {
+            key: 'count', style: { ...metaStyle, margin: 0 },
+          }, __('batch.selected', { n: selected })),
+          React.createElement('span', { key: 'spacer', style: { flex: '1 1 auto' } }),
+          React.createElement('button', {
+            key: 'refresh',
+            type: 'button',
+            style: loading || busy ? ghostBtnOffStyle : ghostBtnStyle,
+            disabled: loading || busy,
+            onClick: () => refresh(),
+          }, __('settings.refresh')),
+          React.createElement('button', {
+            key: 'restore',
+            type: 'button',
+            style: selected === 0 || busy ? ghostBtnOffStyle : ghostBtnStyle,
+            disabled: selected === 0 || busy,
+            onClick: onRestorePicked,
+          }, busy ? __('dialog.busy') : __('settings.restorePicked')),
+          React.createElement('button', {
+            key: 'purge',
+            type: 'button',
+            style: selected === 0 || busy ? dangerOutlineBtnOffStyle : dangerOutlineBtnStyle,
+            disabled: selected === 0 || busy,
+            onClick: onPurge,
+          }, busy ? __('dialog.busy') : __('settings.purge')),
+        ]),
+
+        loading
+          ? React.createElement('div', { key: 'loading', style: { ...metaStyle, marginTop: 10 } },
+              __('settings.loading'))
+          : visible.length === 0
+            ? React.createElement('div', { key: 'none', style: { ...metaStyle, marginTop: 10 } },
+                entries.length === 0 ? __('settings.empty') : __('settings.filterEmpty'))
+            : React.createElement('div', { key: 'list', style: listBoxStyle },
+                visible.map((entry, index) => React.createElement(RecycleRow, {
                   key: entry.sessionId,
                   entry,
+                  border: index > 0,
                   busy: busyId === entry.sessionId,
                   onRestore,
                   picked: picked.has(entry.sessionId),
                   onTogglePick: togglePick,
                   __,
                 }))),
-              ]),
 
-        note ? React.createElement('div', { key: 'note', style: okStyle }, note) : null,
         error ? React.createElement('div', {
           key: 'err', role: 'alert', style: { ...errStyle, whiteSpace: 'pre-wrap' },
         }, error) : null,
@@ -1263,9 +1785,9 @@ window.__ModuleLoader__.load({
      * One recycle-bin row.
      *
      * A bare uuid tells the user nothing about whether to restore it, so the
-     * row leads with what the session was -- its title, or the project folder
-     * when it never had one -- and keeps the id as tertiary detail. The local
-     * time and the id are only shown when they add something.
+     * row leads with what the session was — its title, or the project folder
+     * when it never had one — and keeps the id as tertiary detail. Same row
+     * shape as the session list, so the two lists are scannable the same way.
      */
     function RecycleRow(props) {
       const { entry, busy, onRestore, __ } = props
@@ -1273,67 +1795,37 @@ window.__ModuleLoader__.load({
       const label = (entry.label && String(entry.label).trim())
         || (entry.title && String(entry.title).trim())
         || __('settings.untitled')
-
-      // The project folder, shortened to its last two segments: the full path
-      // is available on hover, and the tail is what identifies it.
       const cwd = typeof entry.cwd === 'string' ? entry.cwd : ''
-      const shortPath = (() => {
-        if (cwd.length === 0) return ''
-        const parts = cwd.split(/[\\/]+/).filter(Boolean)
-        return parts.slice(-2).join('/')
-      })()
+      const when = formatWhen(entry.at)
+      const meta = [shortPath(cwd), when].filter(part => part.length > 0).join(' · ')
 
-      const when = (() => {
-        const at = typeof entry.at === 'number' ? entry.at : undefined
-        if (at === undefined) return ''
-        try {
-          return new Date(at).toLocaleString()
-        } catch { return '' }
-      })()
-
-      const rowStyle = {
-        display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
-        gap: 12, padding: '10px 0',
-        borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
-      }
-      const titleStyle = {
-        fontSize: 13, lineHeight: '20px',
-        color: 'var(--dsw-alias-label-primary, inherit)',
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-      }
-      const subStyle = {
-        fontSize: 12, lineHeight: '18px', marginTop: 2,
-        color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-      }
-      const idStyle = {
-        fontSize: 11, lineHeight: '16px', marginTop: 2,
-        color: 'var(--dsw-alias-label-tertiary, #8a8a8e)',
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-      }
-
-      return React.createElement('div', { style: rowStyle }, [
+      // A `div`, not a `label`: this row contains a button, and a button inside
+      // a label also fires the label's own activation, so clicking "Restore"
+      // would tick the checkbox on its way past.
+      return React.createElement('div', {
+        style: props.border === true ? rowBorderStyle : rowBaseStyle,
+      }, [
         React.createElement('input', {
           key: 'pick',
           type: 'checkbox',
           checked: props.picked === true,
+          disabled: busy === true,
           onChange: () => props.onTogglePick?.(entry.sessionId),
-          style: { marginTop: 4, flex: 'none' },
+          style: { marginTop: 3, flex: 'none' },
           'aria-label': __('settings.selectOne'),
         }),
-        React.createElement('div', {
-          key: 'meta',
-          style: { minWidth: 0, flex: '1 1 auto' },
-        }, [
-          React.createElement('div', { key: 't', style: titleStyle, title: entry.title || label }, label),
-          shortPath.length > 0
-            ? React.createElement('div', { key: 'p', style: subStyle, title: cwd }, shortPath)
-            : null,
-          when.length > 0
-            ? React.createElement('div', { key: 'w', style: subStyle }, when)
-            : null,
-          React.createElement('div', { key: 'i', style: idStyle, title: entry.sessionId }, entry.sessionId),
+        React.createElement('span', { key: 'text', style: { flex: 1, minWidth: 0 } }, [
+          React.createElement('span', { key: 't', style: rowTitleStyle, title: entry.title || label }, label),
+          React.createElement('span', { key: 'm', style: rowMetaStyle, title: cwd || meta }, meta),
+          React.createElement('span', {
+            key: 'i',
+            style: {
+              ...rowMetaStyle,
+              fontSize: 11, lineHeight: '16px',
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+            },
+            title: entry.sessionId,
+          }, entry.sessionId),
         ]),
         React.createElement('button', {
           key: 'restore',
@@ -1341,11 +1833,9 @@ window.__ModuleLoader__.load({
           disabled: busy === true,
           onClick: () => onRestore(entry.sessionId),
           style: {
-            padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: busy ? 'default' : 'pointer',
-            border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
-            background: 'transparent', color: 'var(--dsw-alias-label-primary, inherit)',
+            ...ghostBtnStyle,
             flex: 'none', marginTop: 2,
-            ...(busy === true ? { opacity: 0.5 } : {}),
+            ...(busy === true ? { opacity: 0.5, cursor: 'default' } : {}),
           },
         }, busy === true ? __('settings.restoring') : __('settings.restore')),
       ])
@@ -1519,6 +2009,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      pluginCtx = ctx
       sessionsSvc = ctx.get('sessions')
       if (!sessionsSvc) ctx.inject(['sessions'], (sub) => { sessionsSvc = sub.sessions })
 
@@ -1568,7 +2059,8 @@ window.__ModuleLoader__.load({
         ...(localeSvc ? { locale: NS } : {}),
       }, EmptyWorkspaceDialog))
 
-      // One settings page, holding both the policy and the recycle bin.
+      // Two settings pages: the policy plus the session list, and the recycle
+      // bin. The order keeps them adjacent in the nav, bin second.
       ctx.slots.inject(SETTINGS_SLOT, () => ctx.slots.register({
         name: SETTINGS_SLOT,
         id: SETTINGS_ID,
@@ -1576,6 +2068,14 @@ window.__ModuleLoader__.load({
         label: () => t('settings.nav'),
         ...(localeSvc ? { locale: NS } : {}),
       }, SettingsPanel))
+
+      ctx.slots.inject(SETTINGS_SLOT, () => ctx.slots.register({
+        name: SETTINGS_SLOT,
+        id: RECYCLE_ID,
+        order: 62,
+        label: () => t('settings.recycleNav'),
+        ...(localeSvc ? { locale: NS } : {}),
+      }, RecyclePanel))
 
       // Transient banners. Registered on the overlay (a portalled surface), so
       // a restore reported from the settings page still shows top-center over

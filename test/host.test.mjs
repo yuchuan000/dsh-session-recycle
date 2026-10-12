@@ -52,6 +52,7 @@ function makeCtx(root) {
   return {
     emitted,
     workspaces,
+    sessionsTable,
     get(name) {
       if (name === 'storageDomain') {
         return {
@@ -193,6 +194,256 @@ function makeCtx(root) {
       askRemoveEmptyWorkspace: true,
       useRecycleBin: true,
     })
+  })
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5. HTTP routes: /list and /delete-many -------------------------------
+//
+// These two back the settings page's pick-list. They are exercised through the
+// real registration path (`apply` -> webServer.register) rather than by calling
+// the handlers directly, so a route that stopped being registered fails here.
+
+/**
+ * A request object shaped like the one node hands a route handler: a method,
+ * headers, and an async-iterable body.
+ */
+function makeRequest(method, body, headers = {}) {
+  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')]
+  return {
+    method,
+    headers: { host: '127.0.0.1:5173', ...headers },
+    async *[Symbol.asyncIterator]() { for (const chunk of chunks) yield chunk },
+  }
+}
+
+/** A response object that records what the handler wrote. */
+function makeResponse() {
+  const res = { status: 0, headers: undefined, body: '' }
+  res.writeHead = (status, headers) => { res.status = status; res.headers = headers }
+  res.end = (text) => { res.body = typeof text === 'string' ? text : '' }
+  res.json = () => JSON.parse(res.body)
+  return res
+}
+
+/**
+ * Run `apply` against a fake ctx and hand back the registered routes.
+ *
+ * @returns { routes, ctx } — routes is keyed by path.
+ */
+function mountRoutes(root) {
+  const routes = new Map()
+  const ctx = makeCtx(root)
+  ctx.tools = { register() { return () => {} } }
+  ctx.effect = (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {} }
+  ctx.inject = () => {}
+  ctx.get = ((base) => (name) => {
+    if (name === 'webServer') {
+      return {
+        register(route) {
+          routes.set(route.path, route)
+          return () => { routes.delete(route.path) }
+        },
+      }
+    }
+    return base(name)
+  })(ctx.get.bind(ctx))
+  mod.apply(ctx)
+  return { routes, ctx }
+}
+
+async function callRoute(routes, path, request) {
+  const response = makeResponse()
+  await routes.get(path).handler(request, response)
+  return response
+}
+
+// --- 5a. /list carries the display fields the pick-list renders ---
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5a-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const slug = '--d-work-proj--'
+  const cwd = 'd:/work/proj'
+  const sid = 'session-aaaa1111-2222-3333-4444-555555555555'
+  makeSession(sessionsRoot, slug, sid, cwd)
+
+  const { routes, ctx } = mountRoutes(root)
+  check('/list 已注册', () => assert.ok(routes.has('/__session-recycle/list')))
+
+  // Title comes from the projection cache; without a row it must degrade to ''
+  // rather than throwing or inventing one.
+  const res = await callRoute(routes, '/__session-recycle/list', makeRequest('GET'))
+  const payload = res.json()
+  check('/list 返回会话并带上 cwd 与时间', () => {
+    assert.equal(res.status, 200)
+    assert.equal(payload.ok, true)
+    assert.equal(payload.sessions.length, 1)
+    assert.equal(payload.sessions[0].sessionId, sid)
+    assert.equal(payload.sessions[0].cwd, cwd, 'cwd 来自会话头')
+    assert.equal(payload.sessions[0].title, '', '无投影缓存时标题为空串')
+    assert.equal(typeof payload.sessions[0].updatedAt, 'number')
+  })
+
+  // With a projection-cache row the row leads with its title; the fake ctx's
+  // table reads straight out of the Map the harness owns, so seeding it here is
+  // the same thing the sidebar would see.
+  const seeded = await callRoute(routes, '/__session-recycle/list', makeRequest('GET'))
+  ctx.sessionsTable.set(sid, { rows: { title: { val: '调试记录' } } })
+  check('/list 在投影缓存缺失时仍可用', () => {
+    assert.equal(seeded.json().sessions[0].sessionId, sid)
+  })
+  const titled = await callRoute(routes, '/__session-recycle/list', makeRequest('GET'))
+  check('/list 从投影缓存取标题', () => {
+    assert.equal(titled.json().sessions[0].title, '调试记录')
+  })
+
+  const bad = await callRoute(routes, '/__session-recycle/list', makeRequest('POST'))
+  check('/list 拒绝非 GET', () => assert.equal(bad.status, 405))
+
+  const crossSite = await callRoute(routes, '/__session-recycle/list', makeRequest('GET', undefined, { 'sec-fetch-site': 'cross-site' }))
+  check('/list 拒绝跨站请求', () => assert.equal(crossSite.status, 403))
+
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5b. /delete-many is registered and validates its body ---
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5b-'))
+  process.env.DSH_HOME = root
+  const { routes } = mountRoutes(root)
+  check('/delete-many 已注册', () => assert.ok(routes.has('/__session-recycle/delete-many')))
+
+  const notPost = await callRoute(routes, '/__session-recycle/delete-many', makeRequest('GET'))
+  check('/delete-many 拒绝非 POST', () => assert.equal(notPost.status, 405))
+
+  const cross = await callRoute(routes, '/__session-recycle/delete-many', makeRequest('POST', { sessionIds: ['x'] }, { 'sec-fetch-site': 'cross-site' }))
+  check('/delete-many 拒绝跨站', () => assert.equal(cross.status, 403))
+
+  const missing = await callRoute(routes, '/__session-recycle/delete-many', makeRequest('POST', {}))
+  check('/delete-many 缺少 sessionIds 报 400', () => {
+    assert.equal(missing.status, 400)
+    assert.match(missing.json().error, /sessionIds/)
+  })
+
+  const empty = await callRoute(routes, '/__session-recycle/delete-many', makeRequest('POST', { sessionIds: [] }))
+  check('/delete-many 空数组报 400', () => assert.equal(empty.status, 400))
+
+  const notArray = await callRoute(routes, '/__session-recycle/delete-many', makeRequest('POST', { sessionIds: 'abc' }))
+  check('/delete-many 非数组报 400', () => assert.equal(notArray.status, 400))
+
+  const badPermanent = await callRoute(routes, '/__session-recycle/delete-many', makeRequest('POST', { sessionIds: ['a'], permanent: 'yes' }))
+  check('/delete-many permanent 非布尔报 400', () => assert.equal(badPermanent.status, 400))
+
+  const huge = await callRoute(routes, '/__session-recycle/delete-many',
+    makeRequest('POST', { sessionIds: Array.from({ length: 5001 }, (_, i) => `session-${i}`) }))
+  check('/delete-many 超过 5000 条报 400', () => {
+    assert.equal(huge.status, 400)
+    assert.match(huge.json().error, /too many ids/)
+  })
+
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5c. /delete-many deletes the set and aggregates the emptied workspaces ---
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5c-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const slug = '--d-work-many--'
+  const cwd = 'd:/work/many'
+  const ids = [
+    'session-bbbb1111-2222-3333-4444-555555555551',
+    'session-bbbb1111-2222-3333-4444-555555555552',
+    'session-bbbb1111-2222-3333-4444-555555555553',
+  ]
+  for (const id of ids) makeSession(sessionsRoot, slug, id, cwd)
+
+  const { routes, ctx } = mountRoutes(root)
+  ctx.workspaces.set('ws-many', { id: 'ws-many', title: 'many', path: cwd, sessionIds: [...ids] })
+
+  const res = await callRoute(routes, '/__session-recycle/delete-many', makeRequest('POST', { sessionIds: ids }))
+  const payload = res.json()
+  check('/delete-many 逐条报告删除结果', () => {
+    assert.equal(res.status, 200)
+    assert.equal(payload.ok, true)
+    assert.equal(payload.deleted.length, 3)
+    assert.deepEqual(payload.failed, [])
+    for (const row of payload.deleted) assert.equal(row.recycled, true)
+  })
+  check('/delete-many 目录全部离开 sessions 根', () => {
+    for (const id of ids) assert.equal(existsSync(join(sessionsRoot, slug, id)), false, id)
+  })
+  check('/delete-many 回收站条目齐全且去重', () => {
+    const listed = mod.listRecycled().map(e => e.sessionId).sort()
+    assert.deepEqual(listed, [...ids].sort())
+  })
+  check('/delete-many 聚合去空工作区，只报一次', () => {
+    assert.equal(payload.emptiedWorkspaces.length, 1)
+    assert.equal(payload.emptiedWorkspaces[0].workspaceId, 'ws-many')
+  })
+  check('/delete-many 清空工作区的 sessionIds', () => {
+    assert.deepEqual(ctx.workspaces.get('ws-many').sessionIds, [])
+  })
+
+  // Restore one to leave the workspace non-empty, then delete again with the
+  // duplicate ids the page can produce (a row ticked twice is impossible, but a
+  // retried request is not) — de-duplication must hold.
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5d. /delete-many de-duplicates ids and survives a bad id in the batch ---
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5d-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const slug = '--d-work-mix--'
+  const cwd = 'd:/work/mix'
+  const good = 'session-cccc1111-2222-3333-4444-555555555551'
+  makeSession(sessionsRoot, slug, good, cwd)
+
+  const { routes } = mountRoutes(root)
+  const res = await callRoute(routes, '/__session-recycle/delete-many',
+    makeRequest('POST', { sessionIds: [good, good, '  ' + good + '  ', 'not-a-session-id', { nope: 1 }] }))
+  const payload = res.json()
+  check('/delete-many 去重后只删一次', () => {
+    assert.equal(res.status, 200)
+    assert.equal(payload.deleted.length, 1)
+    assert.equal(payload.deleted[0].sessionId, good)
+  })
+  check('/delete-many 单个坏 id 不中断整批，进 failed', () => {
+    assert.equal(payload.failed.length, 1)
+    assert.equal(payload.failed[0].sessionId, 'not-a-session-id')
+    assert.equal(payload.failed[0].code, 'INVALID_ID')
+  })
+  check('/delete-many 整批结束后目标确实删除', () => {
+    assert.equal(existsSync(join(sessionsRoot, slug, good)), false)
+  })
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5e. /delete-many honours permanent ---
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5e-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const slug = '--d-work-perm--'
+  const cwd = 'd:/work/perm'
+  const sid = 'session-dddd1111-2222-3333-4444-555555555551'
+  makeSession(sessionsRoot, slug, sid, cwd)
+
+  const { routes } = mountRoutes(root)
+  const res = await callRoute(routes, '/__session-recycle/delete-many',
+    makeRequest('POST', { sessionIds: [sid], permanent: true }))
+  const payload = res.json()
+  check('/delete-many permanent 不写回收站', () => {
+    assert.equal(res.status, 200)
+    assert.equal(payload.deleted[0].permanent, true)
+    assert.equal(payload.deleted[0].recycled, false)
+    assert.equal(mod.listRecycled().length, 0)
+  })
+  check('/delete-many permanent 后目录消失', () => {
+    assert.equal(existsSync(join(sessionsRoot, slug, sid)), false)
   })
   rmSync(root, { recursive: true, force: true })
 }
