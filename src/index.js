@@ -1414,6 +1414,19 @@ export async function deleteSession(ctx, sessionId, { permanent = false, setting
 }
 
 /**
+ * One spelling for a path, for comparing two of them.
+ *
+ * The same directory reaches this plugin under several spellings — the session
+ * header keeps whatever case the cwd was first opened with, the workspace
+ * registry stores the `fs.realpath` answer, and either may use `\` or `/`.
+ * Comparing raw strings misses matches that are obvious on screen, so both sides
+ * go through this first.
+ */
+function normalizePathKey(value) {
+  return String(value ?? '').trim().replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
+/**
  * The live workspace grouping, read from the authoritative storage table.
  *
  * `workspaceRegistry.list()` is deliberately NOT used: the registry caches a
@@ -1609,17 +1622,34 @@ function registerRoutes(host, ctx) {
         // uses) and the cwd from the artifact header; the project slug is the
         // fallback for either. Without them the settings page could only offer
         // bare uuids, which is not a list anyone can pick from.
+        //
+        // The workspace title is what names the group the session shows under in
+        // the sidebar — and the registry is the authority on that, so a renamed
+        // group comes back renamed. Matching is by path, not by the registry's
+        // own `sessionIds`: that list is the raw table row, which can name
+        // sessions whose cwd no longer resolves to the group path (the entity's
+        // getter filters those out, and the sidebar follows the getter).
+        const workspaceByPath = new Map()
+        for (const workspace of currentWorkspaces(ctx)) {
+          if (workspace.path.length === 0) continue
+          workspaceByPath.set(normalizePathKey(workspace.path), workspace)
+        }
         sendJson(response, 200, {
           ok: true,
           sessions: listStoredSessions().map((entry) => {
             const described = describeSession(ctx, entry.sessionId)
             const header = readSessionHeader(entry.dir, HEADER_PREFIX_BYTES)
+            const cwd = typeof header?.cwd === 'string' && header.cwd.length > 0
+              ? header.cwd
+              : (described.slug ?? entry.cwd ?? '')
+            const workspace = workspaceByPath.get(normalizePathKey(cwd))
             return {
               sessionId: entry.sessionId,
               title: described.title ?? '',
-              cwd: typeof header?.cwd === 'string' && header.cwd.length > 0
-                ? header.cwd
-                : (described.slug ?? entry.cwd ?? ''),
+              cwd,
+              // 空串而不是 null：客户端只关心「有没有一个分组名」。
+              workspaceId: workspace?.workspaceId ?? '',
+              workspaceTitle: workspace?.title ?? '',
               updatedAt: entry.modifiedAt ?? null,
             }
           }),
@@ -1882,7 +1912,24 @@ function registerRoutes(host, ctx) {
         return
       }
       try {
-        sendJson(response, 200, { ok: true, entries: listRecycled() })
+        // 回收站里的行也要有分组名，才能和会话列表按同一套名字分块。清单里记着
+        // 删除那一刻的 workspaceTitle，但分组可能改名、也可能当时就查不到，所以
+        // 用当前的注册表补一次：先按 id 认，认不到再按路径认。
+        const byId = new Map()
+        const byPath = new Map()
+        for (const workspace of currentWorkspaces(ctx)) {
+          byId.set(workspace.workspaceId, workspace)
+          if (workspace.path.length > 0) byPath.set(normalizePathKey(workspace.path), workspace)
+        }
+        const entries = listRecycled().map((entry) => {
+          const known = byId.get(entry.workspaceId) ?? byPath.get(normalizePathKey(entry.cwd))
+          return {
+            ...entry,
+            workspaceId: known?.workspaceId ?? entry.workspaceId ?? '',
+            workspaceTitle: known?.title ?? entry.workspaceTitle ?? '',
+          }
+        })
+        sendJson(response, 200, { ok: true, entries })
       } catch (error) {
         sendJson(response, 500, { ok: false, error: error.message })
       }

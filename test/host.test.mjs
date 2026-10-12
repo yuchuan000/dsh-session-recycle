@@ -29,6 +29,11 @@ function check(label, fn) {
   try { fn(); results.push({ label, ok: true }) } catch (error) { results.push({ label, ok: false, error }) }
 }
 
+/** Same as `check`, for a body that has to await a route. */
+async function acheck(label, fn) {
+  try { await fn(); results.push({ label, ok: true }) } catch (error) { results.push({ label, ok: false, error }) }
+}
+
 function zstdFrame(text) {
   return zlib.zstdCompressSync(Buffer.from(text, 'utf8'), {
     params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 },
@@ -720,6 +725,84 @@ for (const [auto, expectRemoved] of [[true, true], [false, false]]) {
     return null
   })()
   check('removeWorkspace 在无注册表时报 NO_REGISTRY', () => assert.equal(noRegistry, 'NO_REGISTRY'))
+
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5j. /list and /recycled name the group each session shows under -------
+//
+// The pick-list groups rows by workspace, so both routes must carry a
+// `workspaceTitle`. It has to survive the shape differences the two sides
+// actually produce: the session header keeps whatever case the folder was first
+// opened with, the registry stores the realpath answer, and either may use `\`
+// or `/`.
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5j-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const wsCwd = 'd:/work/proj-a'
+  const looseCwd = 'd:/work/loose'
+  const slug = mod.sessionFolderName(wsCwd)
+  const looseSlug = mod.sessionFolderName(looseCwd)
+  const groupedId = 'session-5a001111-2222-3333-4444-555555555551'
+  const looseId = 'session-5a001111-2222-3333-4444-555555555552'
+  // Deliberately spelled differently from the workspace record: Windows hands
+  // back `D:\...` from one side and `d:/...` from the other.
+  makeSession(sessionsRoot, slug, groupedId, 'D:\\work\\proj-a\\')
+  makeSession(sessionsRoot, looseSlug, looseId, looseCwd)
+
+  const { routes, ctx } = mountRoutes(root)
+  ctx.workspaces.set('ws-a', { id: 'ws-a', title: 'proj-a', path: 'D:/work/proj-a', sessionIds: [groupedId] })
+
+  const listed = (await callRoute(routes, '/__session-recycle/list', makeRequest('GET'))).json().sessions
+  const byId = new Map(listed.map(row => [row.sessionId, row]))
+  check('/list 按路径把会话归到分组名', () => {
+    assert.equal(byId.get(groupedId).workspaceTitle, 'proj-a')
+    assert.equal(byId.get(groupedId).workspaceId, 'ws-a')
+  })
+  check('/list 大小写与分隔符不同也算同一分组', () => {
+    assert.equal(byId.get(groupedId).cwd, 'D:\\work\\proj-a\\', 'cwd 原样回传')
+  })
+  check('/list 没有分组的会话给空串', () => {
+    assert.equal(byId.get(looseId).workspaceTitle, '')
+    assert.equal(byId.get(looseId).workspaceId, '')
+  })
+
+  // Renaming the group must show up: the name is read live, not remembered.
+  ctx.workspaces.set('ws-a', { id: 'ws-a', title: '改过的名字', path: 'D:/work/proj-a', sessionIds: [groupedId] })
+  await acheck('/list 重命名分组后名字跟着变', async () => {
+    const rows = (await callRoute(routes, '/__session-recycle/list', makeRequest('GET'))).json().sessions
+    assert.equal(rows.find(r => r.sessionId === groupedId).workspaceTitle, '改过的名字')
+  })
+
+  // Recycle bin: the manifest records the title at delete time, but that is only
+  // a fallback — the live workspace wins, so a rename shows up here too.
+  await callRoute(routes, '/__session-recycle/delete-many', makeRequest('POST', { sessionIds: [groupedId, looseId] }))
+  const bin = (await callRoute(routes, '/__session-recycle/recycled', makeRequest('GET'))).json().entries
+  const binById = new Map(bin.map(row => [row.sessionId, row]))
+  check('/recycled 带上当前的分组名', () => {
+    assert.equal(binById.get(groupedId).workspaceTitle, '改过的名字')
+    assert.equal(binById.get(groupedId).workspaceId, 'ws-a')
+  })
+  check('/recycled 没有分组的会话给空串', () => {
+    assert.equal(binById.get(looseId).workspaceTitle, '')
+  })
+
+  // The recorded id may be gone (the group was removed) while the cwd still
+  // resolves — the path lookup is the second chance.
+  ctx.workspaces.delete('ws-a')
+  ctx.workspaces.set('ws-b', { id: 'ws-b', title: '重建的分组', path: 'd:/work/proj-a', sessionIds: [] })
+  await acheck('/recycled 记录的 id 失效时按路径认回来', async () => {
+    const rows = (await callRoute(routes, '/__session-recycle/recycled', makeRequest('GET'))).json().entries
+    const row = rows.find(r => r.sessionId === groupedId)
+    assert.equal(row.workspaceTitle, '重建的分组')
+    assert.equal(row.workspaceId, 'ws-b')
+  })
+  ctx.workspaces.clear()
+  await acheck('/recycled 分组全没了就退回删除时记下的名字', async () => {
+    const rows = (await callRoute(routes, '/__session-recycle/recycled', makeRequest('GET'))).json().entries
+    assert.equal(rows.find(r => r.sessionId === groupedId).workspaceTitle, '改过的名字', '不回退成空串')
+  })
 
   rmSync(root, { recursive: true, force: true })
 }

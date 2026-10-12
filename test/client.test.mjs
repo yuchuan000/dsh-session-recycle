@@ -206,6 +206,30 @@ function textOf(tree) {
   return tree.children.map(textOf).join('')
 }
 
+/**
+ * The node that directly holds `target`.
+ *
+ * Needed for the layout assertions: "the filter is on its own row" is a
+ * statement about the tree's shape, and only the parent can prove it.
+ */
+function parentOf(tree, target, parent = null) {
+  if (!tree) return null
+  if (Array.isArray(tree)) {
+    for (const child of tree) {
+      const found = parentOf(child, target, parent)
+      if (found) return found
+    }
+    return null
+  }
+  if (tree.tag === '#text') return null
+  if (tree === target) return parent
+  for (const child of tree.children) {
+    const found = parentOf(child, target, tree)
+    if (found) return found
+  }
+  return null
+}
+
 const byTag = (tree, tag) => nodes(tree, (node) => node.tag === tag)
 const buttons = (tree) => byTag(tree, 'button')
 const buttonExact = (tree, text) => buttons(tree).find((node) => textOf(node).trim() === text)
@@ -233,6 +257,29 @@ const boxes = (tree) => {
   const box = listBox(tree)
   if (!box) return []
   return nodes(box, (node) => node.tag === 'input' && node.props.type === 'checkbox')
+}
+/**
+ * The group headings inside the pick-list, in render order.
+ *
+ * Each carries the group it opens as `data-group`, which is what the assertions
+ * compare on — the label is what the user reads, the key is what identifies it.
+ */
+const groupHeadings = (tree) => nodes(tree, (node) => node.props?.['data-group'] !== undefined)
+const groupKeys = (tree) => groupHeadings(tree).map((node) => String(node.props['data-group']))
+/** The label printed on each group heading, in render order. */
+const groupLabels = (tree) => groupHeadings(tree).map((node) => textOf(node.children[0]))
+/**
+ * The select-all box in a pane's toolbar, and the label that holds it.
+ *
+ * Deliberately not the list-scoped `boxes` helper: this one sits in the action
+ * row *outside* the scroll box, and it is found by its own label so a row's
+ * checkbox can never be mistaken for it. The label is what sits *in* the action
+ * row — the box itself is its child, so layout assertions need both.
+ */
+const selectAllLabel = (tree) => nodes(tree, (node) => node.tag === 'label' && textOf(node).trim() === '全选')[0]
+const selectAllBox = (tree) => {
+  const label = selectAllLabel(tree)
+  return label && nodes(label, (node) => node.tag === 'input' && node.props.type === 'checkbox')[0]
 }
 /**
  * The checkbox of the preference row whose text contains `label`.
@@ -479,7 +526,18 @@ function makeClient({
 
   try { delete window.__sessionRecycleInstalled } catch { /* ignore */ }
   moduleExports.apply(ctx)
-  return { runtime, moduleExports, slots, calls, dictionaries }
+  return {
+    runtime, moduleExports, slots, calls, dictionaries,
+    /**
+     * Rename a group the way the host would: every row the next read returns
+     * carries the new name. Used to prove the headings are read live rather
+     * than remembered from the first load.
+     */
+    renameWorkspace(id, title) {
+      for (const row of recycled) if (row.workspaceId === id) row.workspaceTitle = title
+      for (const row of sessions) if (row.workspaceId === id) row.workspaceTitle = title
+    },
+  }
 }
 
 // --- the fixtures ------------------------------------------------------------
@@ -492,6 +550,40 @@ const SESSIONS = [
 const RECYCLED = [
   { sessionId: 'session-9', title: '旧会话', cwd: 'd:/work/gone', at: 1791400000000, label: '旧会话' },
 ]
+
+/**
+ * Sessions spread over three groups, deliberately out of order.
+ *
+ * The host sorts by nothing — it walks the store — so a list that is not
+ * re-sorted client-side would render an `aa` row, a `zz` row, then another `aa`
+ * row, and the headings would be lies. `session-u` carries no workspace at all,
+ * which is what the 未分组 block is for.
+ */
+const GROUPED_SESSIONS = [
+  { sessionId: 'session-z1', title: 'zz 一号', cwd: 'd:/proj/zz', updatedAt: 1791600000000, workspaceId: 'ws-zz', workspaceTitle: 'zz' },
+  { sessionId: 'session-a1', title: 'aa 一号', cwd: 'd:/proj/aa', updatedAt: 1791500000000, workspaceId: 'ws-aa', workspaceTitle: 'aa' },
+  { sessionId: 'session-u1', title: '没分组', cwd: 'd:/proj/loose', updatedAt: 1791400000000, workspaceId: '', workspaceTitle: '' },
+  { sessionId: 'session-z2', title: 'zz 二号', cwd: 'd:/proj/zz', updatedAt: 1791300000000, workspaceId: 'ws-zz', workspaceTitle: 'zz' },
+  { sessionId: 'session-a2', title: 'aa 二号', cwd: 'd:/proj/aa', updatedAt: 1791200000000, workspaceId: 'ws-aa', workspaceTitle: 'aa' },
+]
+
+/** The same shape in the recycle bin, where the host fills the same two fields. */
+const GROUPED_RECYCLED = [
+  { sessionId: 'session-rz1', title: 'zz 回收', cwd: 'd:/proj/zz', at: 1791600000000, label: 'zz 回收', workspaceId: 'ws-zz', workspaceTitle: 'zz' },
+  { sessionId: 'session-ra1', title: 'aa 回收', cwd: 'd:/proj/aa', at: 1791500000000, label: 'aa 回收', workspaceId: 'ws-aa', workspaceTitle: 'aa' },
+  { sessionId: 'session-ru1', title: '散着的回收', cwd: 'd:/proj/loose', at: 1791400000000, label: '散着的回收', workspaceId: '', workspaceTitle: '' },
+  { sessionId: 'session-rz2', title: 'zz 回收二', cwd: 'd:/proj/zz', at: 1791300000000, label: 'zz 回收二', workspaceId: 'ws-zz', workspaceTitle: 'zz' },
+]
+
+/** One group's worth of rows, for the paging-across-a-group test. */
+const oneGroup = (count, name) => Array.from({ length: count }, (_, index) => ({
+  sessionId: `session-${name}-${index + 1}`,
+  title: `${name} ${index + 1}`,
+  cwd: `d:/proj/${name}`,
+  updatedAt: 1791600000000 - index,
+  workspaceId: `ws-${name}`,
+  workspaceTitle: name,
+}))
 
 const sectionById = (client, id) => client.slots.find((entry) => entry.options.id === id)
 
@@ -807,18 +899,18 @@ await check('勾选后删除：先内联确认，再发一次 delete-many', asyn
   assert.equal(posted[0].body.permanent, false, '回收站开启时不是永久删除')
 })
 
-await check('取消全选与全选在筛选范围内生效', async () => {
+await check('全选框勾上后再点一次就取消，且只在筛选结果范围内', async () => {
   const client = makeClient({ sessions: SESSIONS })
   const panel = sectionById(client, 'session-recycle-settings').component
   let tree = await client.runtime.render(panel)
 
   filterInput(tree).props.onChange({ target: { value: 'scratch' } })
   tree = await client.runtime.settle(panel)
-  buttonByText(tree, '全选').props.onClick()
+  selectAllBox(paneOf(tree, 'sessions')).props.onChange()
   tree = await client.runtime.settle(panel)
   assert.equal(boxes(tree)[0].props.checked, true, '筛选后的可见行应当被勾上')
 
-  buttonByText(tree, '取消全选').props.onClick()
+  selectAllBox(paneOf(tree, 'sessions')).props.onChange()
   tree = await client.runtime.settle(panel)
   assert.equal(boxes(tree)[0].props.checked, false)
 })
@@ -1175,20 +1267,28 @@ await check('每页条数可切换，并且回到第一页', async () => {
   assert.ok(textOf(tree).includes('第 1/3 页'), textOf(tree).slice(0, 200))
 })
 
-await check('全选只作用于当前页，已勾选跨页保留', async () => {
+await check('全选作用于整个筛选结果，不再止步于当前页', async () => {
   const client = makeClient({ sessions: manySessions(60) })
   const panel = sectionById(client, 'session-recycle-settings').component
   let tree = await client.runtime.render(panel)
 
-  buttonByText(tree, '全选本页').props.onClick()
+  selectAllBox(paneOf(tree, 'sessions')).props.onChange()
   tree = await client.runtime.settle(panel)
-  assert.equal(boxes(tree).filter(box => box.props.checked).length, 50, '整页被勾上')
-  assert.ok(textOf(tree).includes('已选 50 条'), `应当报出已选条数：${textOf(tree).slice(0, 300)}`)
+  assert.equal(boxes(tree).filter(box => box.props.checked).length, 50, '当前页整页被勾上')
+  assert.ok(textOf(tree).includes('已选 60 条'),
+    `第二页的行也应当被勾上：${textOf(tree).slice(0, 300)}`)
 
   await buttonByText(tree, '下一页').props.onClick()
   tree = await client.runtime.settle(panel)
-  assert.equal(boxes(tree).filter(box => box.props.checked).length, 0, '第二页没被连带勾上')
-  assert.ok(textOf(tree).includes('已选 50 条'), '勾选跨页保留，计数不重置')
+  assert.equal(boxes(tree).filter(box => box.props.checked).length, 10, '第二页 10 行也是勾上的')
+  assert.ok(selectAllBox(paneOf(tree, 'sessions')).props.checked, '全选框保持勾上状态')
+  assert.ok(textOf(tree).includes('已选 60 条'), '勾选跨页保留，计数不重置')
+
+  // 再点一次：整个结果集一起取消，不留半截。
+  selectAllBox(paneOf(tree, 'sessions')).props.onChange()
+  tree = await client.runtime.settle(panel)
+  assert.equal(boxes(tree).filter(box => box.props.checked).length, 0)
+  assert.ok(!selectAllBox(paneOf(tree, 'sessions')).props.checked)
 })
 
 await check('筛选后回到第一页', async () => {
@@ -1279,6 +1379,156 @@ await check('删除失败时把前五条错误摆在页面上', async () => {
   tree = await client.runtime.settle(panel)
   globalThis.fetch = original
   assert.ok(textOf(tree).includes('磁盘只读'), `失败原因应当显示；请求：${client.calls.map(c => c.path).join(', ')}；文案：${textOf(tree)}`)
+})
+
+// --- 9. 工具栏分两行 / 分组 ---------------------------------------------------
+//
+// 这一节验的是两件被显式要求过的界面行为：筛选框独占一行、其余按钮（以全选框打
+// 头）在下一行；以及两个列表都按分组分块，小标题写分组名。
+
+await check('会话列表：筛选框独占一行，操作行以全选框开头且全选框在最左', async () => {
+  const client = makeClient({ sessions: SESSIONS })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  const pane = paneOf(tree, 'sessions')
+
+  const input = filterInput(pane)
+  const filterRow = parentOf(pane, input)
+  assert.ok(filterRow, '筛选框应当有一个容器')
+  assert.equal(filterRow.children.length, 1, '筛选框那一行只该有筛选框，按钮不许挤进来')
+  assert.equal(input.props.style.width, '100%', '筛选框应当占满一行')
+
+  const allBox = selectAllBox(pane)
+  assert.ok(allBox, `操作行应当有全选框，当前可点：${reachable(pane)}`)
+  const actionRow = parentOf(pane, selectAllLabel(pane))
+  assert.notEqual(actionRow, filterRow, '全选框必须在筛选框下面那一行')
+  assert.equal(actionRow.children[0].tag, 'label', '全选框应当在操作行的最左侧')
+  assert.equal(textOf(actionRow.children[0]).trim(), '全选')
+
+  // The filter row must sit *above* the action row, which is the "筛选框单独占一
+  // 行，其他按钮放在其下方一行" the change asked for.
+  const blocks = parentOf(pane, filterRow).children
+  assert.ok(blocks.indexOf(filterRow) < blocks.indexOf(actionRow), '筛选框应当在按钮上方')
+})
+
+await check('会话列表：全选框是复选框，不是按钮', async () => {
+  const client = makeClient({ sessions: SESSIONS })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  const allBox = selectAllBox(paneOf(tree, 'sessions'))
+  assert.equal(allBox.props.type, 'checkbox')
+  const allButtons = buttons(paneOf(tree, 'sessions')).map(textOf).map(text => text.trim())
+  assert.ok(!allButtons.includes('全选'), `全选不该再是一个按钮：${allButtons.join('|')}`)
+})
+
+await check('会话列表：同一分组的行相邻，块与块之间是小标题', async () => {
+  const client = makeClient({ sessions: GROUPED_SESSIONS })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  const pane = paneOf(tree, 'sessions')
+
+  assert.deepEqual(groupKeys(pane), ['ws-aa', 'ws-zz', ''], '分组顺序：aa、zz、未分组垫底')
+  assert.deepEqual(groupLabels(pane), ['aa', 'zz', '未分组'], '小标题写分组名')
+  assert.deepEqual(rowTitles(pane),
+    ['aa 一号', 'aa 二号', 'zz 一号', 'zz 二号', '没分组'],
+    '同组相邻，未分组在最后')
+})
+
+await check('会话列表：小标题带本组的条数，同一组只有一条小标题', async () => {
+  const client = makeClient({ sessions: GROUPED_SESSIONS })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  const pane = paneOf(tree, 'sessions')
+
+  const headings = groupHeadings(pane)
+  assert.equal(headings.length, 3, '三个分组三条小标题，不该每行都挂一个')
+  assert.equal(textOf(headings[1]), 'zz2', '小标题是「分组名 + 条数」')
+})
+
+await check('会话列表：分组名被改写（重命名）后照着新名字显示', async () => {
+  const renamed = GROUPED_SESSIONS.map(row => (
+    row.workspaceId === 'ws-aa' ? { ...row, workspaceTitle: '改名了' } : row
+  ))
+  const client = makeClient({ sessions: renamed })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  assert.deepEqual(groupLabels(paneOf(tree, 'sessions')), ['改名了', 'zz', '未分组'])
+})
+
+await check('会话列表：翻到下一组时页首重新给出分组名', async () => {
+  const client = makeClient({ sessions: [...oneGroup(30, 'aa'), ...oneGroup(30, 'zz')] })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+
+  assert.deepEqual(groupKeys(paneOf(tree, 'sessions')), ['ws-aa', 'ws-zz'],
+    '第一页从 aa 跨到 zz，两条小标题都要在')
+
+  await buttonByText(tree, '下一页').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.deepEqual(rowTitles(paneOf(tree, 'sessions'))[0], 'zz 21', '第二页从 zz 组中间开始')
+  assert.deepEqual(groupKeys(paneOf(tree, 'sessions')), ['ws-zz'],
+    '页首必须重新说明这是哪个分组')
+})
+
+await check('回收站：筛选框独占一行，操作行以全选框开头', async () => {
+  const client = makeClient({ recycled: RECYCLED })
+  const pane = await binPane(client)
+
+  const filterRow = parentOf(pane, filterInput(pane))
+  assert.equal(filterRow.children.length, 1, '回收站的筛选框也独占一行')
+  const allBox = selectAllBox(pane)
+  assert.ok(allBox, '回收站也要有全选框')
+  const actionRow = parentOf(pane, selectAllLabel(pane))
+  assert.equal(actionRow.children[0].tag, 'label')
+  assert.equal(textOf(actionRow.children[0]).trim(), '全选')
+  assert.ok(parentOf(pane, filterRow).children.indexOf(filterRow)
+    < parentOf(pane, filterRow).children.indexOf(actionRow), '筛选框在按钮上方')
+})
+
+await check('回收站：全选作用于整个筛选结果', async () => {
+  const many = Array.from({ length: 60 }, (_, index) => ({
+    sessionId: `session-${index + 1}`,
+    title: `旧会话 ${index + 1}`,
+    cwd: 'd:/work/proj',
+    at: 1791600000000 + index,
+    label: `旧会话 ${index + 1}`,
+    workspaceId: 'ws-proj',
+    workspaceTitle: 'proj',
+  }))
+  const client = makeClient({ recycled: many })
+  const panel = panelOf(client)
+  const tree = await tabTree(client, 'recycle')
+
+  selectAllBox(paneOf(tree, 'recycle')).props.onChange()
+  const after = await client.runtime.settle(panel)
+  assert.equal(boxes(paneOf(after, 'recycle')).filter(box => box.props.checked).length, 50)
+  assert.ok(textOf(after).includes('已选 60 条'),
+    `回收站的第二页也该被勾上：${textOf(after).slice(0, 300)}`)
+})
+
+await check('回收站：按分组分块，小标题写分组名', async () => {
+  const client = makeClient({ recycled: GROUPED_RECYCLED })
+  const pane = await binPane(client)
+
+  assert.deepEqual(groupKeys(pane), ['ws-aa', 'ws-zz', ''])
+  assert.deepEqual(groupLabels(pane), ['aa', 'zz', '未分组'])
+  assert.deepEqual(rowTitles(pane),
+    ['aa 回收', 'zz 回收', 'zz 回收二', '散着的回收'],
+    '同一分组的条目相邻')
+})
+
+await check('回收站：还原后重新分块，分组名跟着 host 的当前名字走', async () => {
+  // The host re-reads the workspace on every /recycled, so a rename between two
+  // reads has to land in the heading on the second one.
+  const client = makeClient({ recycled: GROUPED_RECYCLED })
+  const pane = await binPane(client)
+  assert.equal(groupLabels(pane)[1], 'zz')
+
+  client.renameWorkspace('ws-zz', '改名后的 zz')
+  const panel = panelOf(client)
+  const tree = await client.runtime.settle(panel)
+  assert.ok(groupLabels(paneOf(tree, 'recycle')).includes('改名后的 zz'),
+    `分组名应当跟着变：${groupLabels(paneOf(tree, 'recycle')).join('|')}`)
 })
 
 for (const result of results) {

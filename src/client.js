@@ -95,7 +95,8 @@ window.__ModuleLoader__.load({
       'settings.restored': '已还原，可在会话列表中找到它。',
       'settings.restoredGrouped': '已还原，并已放回「{name}」分组。',
       'batch.selected': '已选 {n} 条',
-      'settings.selectAll': '全选本页',
+      'settings.selectAll': '全选',
+      'settings.groupUngrouped': '未分组',
       'settings.selectOne': '选择这一条',
       'settings.restorePicked': '恢复所选',
       'settings.restoredMany': '已恢复 {n} 条，其中 {g} 条已放回原分组。',
@@ -109,7 +110,6 @@ window.__ModuleLoader__.load({
       'settings.sessionsHint': '勾选后一次删除多个会话。删除后可在回收站还原（回收站关闭时不可还原）。',
       'settings.filter': '筛选（标题 / 目录 / 序列号）',
       'settings.refresh': '刷新',
-      'settings.selectNone': '取消全选',
       'settings.emptySessions': '没有可删除的会话。',
       'settings.filterEmpty': '没有匹配的会话。',
       'settings.count': '共 {n} 个会话',
@@ -189,7 +189,8 @@ window.__ModuleLoader__.load({
       'settings.restored': 'Restored. It is back in the session list.',
       'settings.restoredGrouped': 'Restored, and put back in "{name}".',
       'batch.selected': '{n} selected',
-      'settings.selectAll': 'Select page',
+      'settings.selectAll': 'Select all',
+      'settings.groupUngrouped': 'Ungrouped',
       'settings.selectOne': 'Select this entry',
       'settings.restorePicked': 'Restore selected',
       'settings.restoredMany': 'Restored {n} entry(ies); {g} went back to their group.',
@@ -204,7 +205,6 @@ window.__ModuleLoader__.load({
       'settings.sessionsHint': 'Tick several entries to delete them in one go. A deletion lands in the recycle bin and can be restored (unless the bin is off).',
       'settings.filter': 'Filter (title / folder / id)',
       'settings.refresh': 'Refresh',
-      'settings.selectNone': 'Select none',
       'settings.emptySessions': 'No sessions to delete.',
       'settings.filterEmpty': 'No session matches the filter.',
       'settings.count': '{n} session(s)',
@@ -991,17 +991,56 @@ window.__ModuleLoader__.load({
       color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
     }
-    const toolbarStyle = {
+    /**
+     * The toolbar, in two rows.
+     *
+     * The filter is a box the user types into; the buttons are things they
+     * press. On one wrapped row the filter shared its line with four buttons and
+     * ended up a 140px slot in the middle of them. It gets its own row now, and
+     * the row under it holds the controls — which is also what lets the
+     * select-all box sit flush left, exactly where each row's own box is.
+     *
+     * Both lists on this page use it, so the two tabs read as one pattern.
+     */
+    const filterRowStyle = { padding: '6px 0 0' }
+    const actionRowStyle = {
       display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8,
-      padding: '6px 0 8px',
-      borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
+      padding: '8px 0',
     }
     const filterInputStyle = {
-      flex: '1 1 180px', minWidth: 140, padding: '5px 10px',
+      width: '100%', boxSizing: 'border-box', padding: '5px 10px',
       fontSize: 12, borderRadius: 8,
       border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
       background: 'transparent', color: 'var(--dsw-alias-label-primary, inherit)',
     }
+    /** The select-all box: shaped like a list row's own, so the parallel reads. */
+    const selectAllStyle = {
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      flex: 'none', cursor: 'pointer', fontSize: 12, lineHeight: '18px',
+    }
+    /**
+     * A group heading inside the pick-list.
+     *
+     * The list is one flat scroll box, so groups need something to be *seen* as
+     * groups: rows are sorted by group and each run is opened by this bar. It is
+     * repeated at the top of every page on purpose — a page that starts in the
+     * middle of a group still has to say which group that is.
+     *
+     * A heading bar was chosen over a per-row group badge: the badge repeats the
+     * same folder on every line, which is exactly the noise a list this long
+     * cannot afford, and it leaves the eye with nothing to scan. The bar draws
+     * the boundary once and names it.
+     */
+    const groupHeadingStyle = {
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '6px 10px',
+      fontSize: 12, lineHeight: '18px', fontWeight: 600,
+      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
+      background: 'var(--dsw-alias-border-l1, rgba(128,128,128,.12))',
+      borderTop: '1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.18))',
+    }
+    /** The first heading has the box's own top edge; a line there would double it. */
+    const groupHeadingFirstStyle = { ...groupHeadingStyle, borderTop: 'none' }
     const ghostBtnStyle = {
       padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
       border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
@@ -1065,12 +1104,141 @@ window.__ModuleLoader__.load({
       return parts.slice(-2).join('/')
     }
 
+    /** The last segment of a path — the folder's own name. */
+    function lastSegment(value) {
+      if (typeof value !== 'string') return ''
+      const parts = value.split(/[\\/]+/).filter(part => part.length > 0)
+      return parts.length > 0 ? parts[parts.length - 1] : ''
+    }
+
+    // --- grouping ----------------------------------------------------------------
+    //
+    // 两个列表都是「一个分组里的一堆会话」，行与行之间却没有结构：删掉一个项目
+    // 的十几个会话时，得自己记住哪些行属于同一个项目。分组把这件事变成看得见的
+    // 东西——同名分组相邻，块与块之间有一条小标题。
+    //
+    // 分组不是从路径猜的：会话在侧栏里挂在哪个分组下，由 workspace 注册表说了算
+    // （见 host 侧的 /list），所以这里直接读它给的那两个字段。读不到就归到「未分
+    // 组」——那正是这一行在侧栏里的处境。
+
+    /** The group a row belongs to: the workspace's id, or '' for none. */
+    function groupKeyOf(row) {
+      const id = typeof row?.workspaceId === 'string' ? row.workspaceId.trim() : ''
+      return id.length > 0 ? id : ''
+    }
+
+    /**
+     * What to print for a row's group: the workspace's name, else its folder name.
+     *
+     * The title is preferred over the path because that is the string the sidebar
+     * shows; renaming a group has to be visible here too. The folder is only the
+     * fallback for a row the registry answered about by path and never titled.
+     */
+    function groupLabelOf(row, key) {
+      if (key.length === 0) return ''
+      const title = typeof row?.workspaceTitle === 'string' ? row.workspaceTitle.trim() : ''
+      return title.length > 0 ? title : lastSegment(row?.cwd)
+    }
+
+    /**
+     * Rows in group order: same group adjacent, groups by name, no-group last.
+     *
+     * Sorting is what makes the headings meaningful — a heading over an
+     * unsorted run would just be a label that happens to be true once. Order
+     * inside a group is left as the host sent it (newest first).
+     *
+     * @returns {{ row, key, label }[]}
+     */
+    function groupRows(rows) {
+      return rows
+        .map(row => {
+          const key = groupKeyOf(row)
+          return { row, key, label: groupLabelOf(row, key) }
+        })
+        .sort((a, b) => {
+          // Sessions with no group cannot be placed; they go last rather than
+          // first, so the named groups stay at the top where they are read.
+          if (a.label.length === 0 && b.label.length > 0) return 1
+          if (b.label.length === 0 && a.label.length > 0) return -1
+          const byName = a.label.localeCompare(b.label)
+          if (byName !== 0) return byName
+          // Two groups can share a folder name (a `src` on two drives). The id
+          // breaks the tie so the two blocks stay separate and each keeps its
+          // own heading, instead of merging into one bar that is true of half
+          // the rows under it.
+          return a.key.localeCompare(b.key)
+        })
+    }
+
+    /**
+     * How many rows each group holds, over the rows currently visible.
+     *
+     * Counted over the filtered list, not the page: the heading is a statement
+     * about the group, and "3" that means "3 on this page" would be a different
+     * statement that changes as you page.
+     */
+    function groupCounts(entries) {
+      const counts = new Map()
+      for (const entry of entries) counts.set(entry.key, (counts.get(entry.key) ?? 0) + 1)
+      return counts
+    }
+
+    /**
+     * One group's heading inside the pick-list.
+     *
+     * `title` carries the full group name so the shortening never hides the only
+     * thing that distinguishes two projects with the same folder name.
+     */
+    function GroupHeading(props) {
+      const { label, groupKey, count, first, __ } = props
+      return React.createElement('div', {
+        style: first ? groupHeadingFirstStyle : groupHeadingStyle,
+        'data-group': groupKey,
+      }, [
+        React.createElement('span', {
+          key: 'name',
+          style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+          title: label,
+        }, label.length > 0 ? label : __('settings.groupUngrouped')),
+        React.createElement('span', { key: 'n', style: tabBadgeStyle }, String(count)),
+      ])
+    }
+
+    /**
+     * The select-all box, at the head of the toolbar's second row.
+     *
+     * A checkbox rather than a button, because it is the same gesture as ticking
+     * a row — and it selects the whole filtered list, not the page: the button
+     * it replaces said "this page", which meant a select-all that silently
+     * stopped at row 50. The filter is what narrows a selection now, and the
+     * count next to it is always the honest number.
+     */
+    function SelectAllBox(props) {
+      const { label, checked, disabled, onToggle } = props
+      return React.createElement('label', {
+        style: {
+          ...selectAllStyle,
+          ...(disabled ? { opacity: 0.5, cursor: 'default' } : {}),
+        },
+      }, [
+        React.createElement('input', {
+          key: 'box',
+          type: 'checkbox',
+          checked: checked === true,
+          disabled: disabled === true,
+          onChange: () => onToggle(),
+          style: { flex: 'none' },
+        }),
+        React.createElement('span', { key: 'l' }, label),
+      ])
+    }
+
     // --- pager -------------------------------------------------------------------
     //
     // Both pick-lists grow with the store, so they are paged rather than left to
-    // run off the bottom of the modal. Paging also gives "select all" a
-    // meaning the user can see: it means the rows in front of them, not sixty
-    // rows they have to scroll past to audit.
+    // run off the bottom of the modal. Paging keeps the list scannable; it no
+    // longer limits a selection — select-all means the whole filtered list, and
+    // the pager is only how much of it is on screen at once.
     //
     // The page size is a local preference (localStorage), not a host setting:
     // how many rows fit on a screen is a property of the screen, and nothing
@@ -1727,24 +1895,30 @@ window.__ModuleLoader__.load({
             || String(row.sessionId || '').toLowerCase().includes(needle)
           ))
 
-      const { rows: pageRows, page: safePage, pageCount } = paginate(visible, page, pageSize)
-      const pagePicked = pageRows.filter(row => picked.has(row.sessionId)).length
-      const allPagePicked = pageRows.length > 0 && pagePicked === pageRows.length
+      // Rows go into the list grouped, so the page slices groups rather than the
+      // flat list; the heading is re-emitted at the top of every page so a page
+      // that lands mid-group still names the group it is in.
+      const entries = groupRows(visible)
+      const counts = groupCounts(entries)
+      const { rows: pageEntries, page: safePage, pageCount } = paginate(entries, page, pageSize)
 
-      // Select acts on the page, not on the filter: with 400 sessions behind a
-      // filter, "select all" that reached off-screen would hand the delete
-      // button ids the user never saw.
+      // Select acts on the filtered list, not on the page: ticking the box is a
+      // statement about "everything here", and a filter is how the user says
+      // what "here" means. Narrowing with the filter is the way to select a
+      // subset; paging is only how much of it is on screen.
+      const allVisiblePicked = visible.length > 0 && visible.every(row => picked.has(row.sessionId))
       const toggleAllVisible = useCallback(() => {
         setPicked((prev) => {
           const next = new Set(prev)
-          if (pageRows.every(row => next.has(row.sessionId))) {
-            for (const row of pageRows) next.delete(row.sessionId)
+          if (visible.every(row => next.has(row.sessionId))) {
+            for (const row of visible) next.delete(row.sessionId)
           } else {
-            for (const row of pageRows) next.add(row.sessionId)
+            for (const row of visible) next.add(row.sessionId)
           }
           return next
         })
-      }, [pageRows])
+        setConfirming(false)
+      }, [visible])
 
       const onPageSize = useCallback((size) => {
         setPageSize(size)
@@ -1837,10 +2011,11 @@ window.__ModuleLoader__.load({
         React.createElement('div', { key: 'h', style: { ...hintStyle, paddingTop: 8 } },
           __('settings.sessionsHint')),
 
-        // Toolbar: filter, select helpers, refresh, and the one destructive verb.
-        React.createElement('div', { key: 'bar', style: toolbarStyle }, [
+        // Toolbar in two rows: the filter gets the whole first line, and the row
+        // under it starts with the select-all box — flush left, in the same
+        // column as every row's own checkbox.
+        React.createElement('div', { key: 'filterRow', style: filterRowStyle },
           React.createElement('input', {
-            key: 'filter',
             type: 'text',
             value: filter,
             placeholder: __('settings.filter'),
@@ -1849,14 +2024,16 @@ window.__ModuleLoader__.load({
             onChange: (event) => { setFilter(event.target.value); setPage(0) },
             style: filterInputStyle,
             'aria-label': __('settings.filter'),
-          }),
-          React.createElement('button', {
+          })),
+
+        React.createElement('div', { key: 'bar', style: actionRowStyle }, [
+          React.createElement(SelectAllBox, {
             key: 'all',
-            type: 'button',
-            style: pageRows.length === 0 ? ghostBtnOffStyle : ghostBtnStyle,
-            disabled: pageRows.length === 0,
-            onClick: toggleAllVisible,
-          }, allPagePicked ? __('settings.selectNone') : __('settings.selectAll')),
+            label: __('settings.selectAll'),
+            checked: allVisiblePicked,
+            disabled: visible.length === 0 || loading || busy,
+            onToggle: toggleAllVisible,
+          }),
           React.createElement('button', {
             key: 'refresh',
             type: 'button',
@@ -1924,14 +2101,35 @@ window.__ModuleLoader__.load({
             ? React.createElement('div', { key: 'none', style: { ...metaStyle, marginTop: 10 } },
                 sessions.length === 0 ? __('settings.emptySessions') : __('settings.filterEmpty'))
             : React.createElement('div', { key: 'list', style: listBoxStyle },
-                pageRows.map((session, index) => React.createElement(SessionRow, {
-                  key: session.sessionId,
-                  session,
-                  border: index > 0,
-                  busy,
-                  picked: picked.has(session.sessionId),
-                  onTogglePick: togglePick,
-                }))),
+                pageEntries.flatMap((entry, index) => {
+                  const session = entry.row
+                  // A heading opens each group, and page 1 of a group is only
+                  // "the first row of the page": a page that starts mid-group
+                  // still has to say which group these rows belong to.
+                  const opensGroup = index === 0 || pageEntries[index - 1].key !== entry.key
+                  const nodes = []
+                  if (opensGroup) {
+                    nodes.push(React.createElement(GroupHeading, {
+                      key: `group:${entry.key}:${index}`,
+                      groupKey: entry.key,
+                      label: entry.label,
+                      count: counts.get(entry.key) ?? 0,
+                      first: index === 0,
+                      __,
+                    }))
+                  }
+                  nodes.push(React.createElement(SessionRow, {
+                    key: session.sessionId,
+                    session,
+                    // The heading already draws the line above the group's first
+                    // row; a border there too would draw it twice.
+                    border: !opensGroup,
+                    busy,
+                    picked: picked.has(session.sessionId),
+                    onTogglePick: togglePick,
+                  }))
+                  return nodes
+                })),
 
         // Not rendered while empty: a footer under "nothing to delete" is one
         // more line of furniture.
@@ -2175,19 +2373,27 @@ window.__ModuleLoader__.load({
             || String(entry.sessionId || '').toLowerCase().includes(needle)
           ))
 
-      const { rows: pageRows, page: safePage, pageCount } = paginate(visible, page, pageSize)
-      const allPagePicked = pageRows.length > 0 && pageRows.every(entry => picked.has(entry.sessionId))
+      // Same grouping as the session list: an entry whose session still names a
+      // workspace shows it under that group's bar, and everything else lands in
+      // one 未分组 block at the end.
+      const grouped = groupRows(visible)
+      const counts = groupCounts(grouped)
+      const { rows: pageEntries, page: safePage, pageCount } = paginate(grouped, page, pageSize)
+
+      // Same contract as the session list's box: the whole filtered list, not
+      // the page in front of the user.
+      const allVisiblePicked = visible.length > 0 && visible.every(entry => picked.has(entry.sessionId))
       const toggleAllVisible = useCallback(() => {
         setPicked((prev) => {
           const next = new Set(prev)
-          if (pageRows.every(entry => next.has(entry.sessionId))) {
-            for (const entry of pageRows) next.delete(entry.sessionId)
+          if (visible.every(entry => next.has(entry.sessionId))) {
+            for (const entry of visible) next.delete(entry.sessionId)
           } else {
-            for (const entry of pageRows) next.add(entry.sessionId)
+            for (const entry of visible) next.add(entry.sessionId)
           }
           return next
         })
-      }, [pageRows])
+      }, [visible])
 
       const onPageSize = useCallback((size) => {
         setPageSize(size)
@@ -2203,23 +2409,26 @@ window.__ModuleLoader__.load({
         React.createElement('div', { key: 'hint', style: { ...metaStyle, margin: '0 0 8px', paddingTop: 8 } },
           __('settings.recycleHint')),
 
-        React.createElement('div', { key: 'bar', style: toolbarStyle }, [
+        // Two rows, same as the session list's: filter on its own line, then the
+        // select-all box at the far left of the action row.
+        React.createElement('div', { key: 'filterRow', style: filterRowStyle },
           React.createElement('input', {
-            key: 'filter',
             type: 'text',
             value: filter,
             placeholder: __('settings.filter'),
             onChange: (event) => { setFilter(event.target.value); setPage(0) },
             style: filterInputStyle,
             'aria-label': __('settings.filter'),
-          }),
-          React.createElement('button', {
+          })),
+
+        React.createElement('div', { key: 'bar', style: actionRowStyle }, [
+          React.createElement(SelectAllBox, {
             key: 'all',
-            type: 'button',
-            style: pageRows.length === 0 ? ghostBtnOffStyle : ghostBtnStyle,
-            disabled: pageRows.length === 0,
-            onClick: toggleAllVisible,
-          }, allPagePicked ? __('settings.selectNone') : __('settings.selectAll')),
+            label: __('settings.selectAll'),
+            checked: allVisiblePicked,
+            disabled: visible.length === 0 || loading || busy,
+            onToggle: toggleAllVisible,
+          }),
           React.createElement('span', {
             key: 'count', style: { ...metaStyle, margin: 0 },
           }, __('batch.selected', { n: selected })),
@@ -2254,16 +2463,32 @@ window.__ModuleLoader__.load({
             ? React.createElement('div', { key: 'none', style: { ...metaStyle, marginTop: 10 } },
                 entries.length === 0 ? __('settings.empty') : __('settings.filterEmpty'))
             : React.createElement('div', { key: 'list', style: listBoxStyle },
-                pageRows.map((entry, index) => React.createElement(RecycleRow, {
-                  key: entry.sessionId,
-                  entry,
-                  border: index > 0,
-                  busy: busyId === entry.sessionId,
-                  onRestore,
-                  picked: picked.has(entry.sessionId),
-                  onTogglePick: togglePick,
-                  __,
-                }))),
+                pageEntries.flatMap((item, index) => {
+                  const entry = item.row
+                  const opensGroup = index === 0 || pageEntries[index - 1].key !== item.key
+                  const nodes = []
+                  if (opensGroup) {
+                    nodes.push(React.createElement(GroupHeading, {
+                      key: `group:${item.key}:${index}`,
+                      groupKey: item.key,
+                      label: item.label,
+                      count: counts.get(item.key) ?? 0,
+                      first: index === 0,
+                      __,
+                    }))
+                  }
+                  nodes.push(React.createElement(RecycleRow, {
+                    key: entry.sessionId,
+                    entry,
+                    border: !opensGroup,
+                    busy: busyId === entry.sessionId,
+                    onRestore,
+                    picked: picked.has(entry.sessionId),
+                    onTogglePick: togglePick,
+                    __,
+                  }))
+                  return nodes
+                })),
 
         loading || visible.length === 0
           ? null
