@@ -707,6 +707,23 @@ await check('tabs 之外的设置项都收进右上角「配置」按钮', async
   assert.ok(!text.includes('删除设置'), '弹窗内容不该落在页面树里')
 })
 
+await check('配置弹窗的开关从「代价最大」往下排', async () => {
+  const client = makeClient({})
+  const { config } = await openConfig(client)
+  // Document order: `nodes` walks pre-order, so index order is render order.
+  const all = nodes(config, () => true)
+  const at = (predicate) => all.findIndex(predicate)
+  const bin = at((node) => node.tag === 'label' && textOf(node).includes('移入回收站'))
+  const confirm = at((node) => node.tag === 'label' && textOf(node).includes('先确认'))
+  const prune = at((node) => node.tag === 'label' && textOf(node).includes('自动清理'))
+  const sweep = at((node) => node.tag === 'button' && textOf(node).trim() === '清理')
+
+  assert.ok(bin >= 0 && confirm >= 0 && prune >= 0, `三个开关都要在：${textOf(config).slice(0, 400)}`)
+  assert.ok(bin < confirm, '回收站开关排第一：关掉它，另外两个的保护就都失效了')
+  assert.ok(confirm < prune, '先确认排在自动清理之前')
+  assert.ok(sweep > prune, '清理是动作不是设置，排在三个开关之后')
+})
+
 // --- 4. batch delete ---------------------------------------------------------
 
 await check('勾选后删除：先内联确认，再发一次 delete-many', async () => {

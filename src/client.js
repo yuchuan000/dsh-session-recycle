@@ -65,6 +65,9 @@ window.__ModuleLoader__.load({
       'settings.configDesc': '这里的勾选改完立即生效，关掉即生效完毕。',
       'settings.close': '关闭',
       'settings.behaviour': '删除行为',
+      'settings.useRecycleBin': '删除时移入回收站',
+      'settings.useRecycleBinHint': '关闭后删除不可恢复。默认开启。',
+      'settings.binOffWarning': '⚠ 回收站已关闭：删除将无法还原。',
       'settings.confirmSingleDelete': '删除单个会话时先确认',
       'settings.confirmSingleDeleteHint': '关闭后点删除会直接执行，不再弹确认框。',
       'settings.autoPrune': '删除后自动清理空分组与空目录',
@@ -82,9 +85,6 @@ window.__ModuleLoader__.load({
       'settings.cleaned': '已清理 {dirs} 个空目录、{workspaces} 个空分组',
       'settings.cleanedPartial': '已清理 {ok} 个，{fail} 个失败',
       'settings.cleanupNothing': '没有需要清理的空分组或空目录',
-      'settings.useRecycleBin': '删除时移入回收站',
-      'settings.useRecycleBinHint': '关闭后删除不可恢复。默认开启。',
-      'settings.binOffWarning': '⚠ 回收站已关闭：删除将无法还原。',
       'settings.recycle': '回收站',
       'settings.recycleHint': '由本插件删除、且仍可还原的会话。',
       'settings.loading': '正在读取…',
@@ -159,6 +159,9 @@ window.__ModuleLoader__.load({
       'settings.configDesc': 'Every tick here applies immediately — just close this when you are done.',
       'settings.close': 'Close',
       'settings.behaviour': 'Behaviour',
+      'settings.useRecycleBin': 'Move deleted sessions to the recycle bin',
+      'settings.useRecycleBinHint': 'When off, deletion cannot be undone. On by default.',
+      'settings.binOffWarning': '⚠ The recycle bin is off: deletions cannot be restored.',
       'settings.confirmSingleDelete': 'Confirm before deleting a session',
       'settings.confirmSingleDeleteHint': 'When off, clicking delete acts immediately with no dialog.',
       'settings.autoPrune': 'Clean up emptied groups and folders after a delete',
@@ -176,9 +179,6 @@ window.__ModuleLoader__.load({
       'settings.cleaned': 'Removed {dirs} empty folder(s) and {workspaces} empty group(s)',
       'settings.cleanedPartial': 'Removed {ok}, {fail} failed',
       'settings.cleanupNothing': 'No empty group or folder to clean',
-      'settings.useRecycleBin': 'Move deleted sessions to the recycle bin',
-      'settings.useRecycleBinHint': 'When off, deletion cannot be undone. On by default.',
-      'settings.binOffWarning': '⚠ The recycle bin is off: deletions cannot be restored.',
       'settings.recycle': 'Recycle bin',
       'settings.recycleHint': 'Sessions this plugin deleted that are still restorable.',
       'settings.loading': 'Loading…',
@@ -1412,6 +1412,20 @@ window.__ModuleLoader__.load({
         React.createElement('div', {
           key: 'h', style: { ...settingLabelStyle, fontWeight: 600, marginBottom: 2 },
         }, __('settings.behaviour')),
+        // Ordered by how much each one costs to get wrong: whether a deletion
+        // can be undone at all, then whether a stray click gets a second look,
+        // then the housekeeping that only tidies what the first two left.
+        React.createElement(SettingRow, {
+          key: 'bin',
+          label: __('settings.useRecycleBin'),
+          hint: __('settings.useRecycleBinHint'),
+          checked: settingsValue('useRecycleBin'),
+          onChange: (value) => updateSetting('useRecycleBin', value),
+        }),
+        binOff
+          ? React.createElement('div', { key: 'binwarn', style: { ...errStyle, marginTop: 0 } },
+              __('settings.binOffWarning'))
+          : null,
         React.createElement(SettingRow, {
           key: 'confirm',
           label: __('settings.confirmSingleDelete'),
@@ -1426,17 +1440,6 @@ window.__ModuleLoader__.load({
           checked: settingsValue('autoPruneEmpty'),
           onChange: (value) => updateSetting('autoPruneEmpty', value),
         }),
-        React.createElement(SettingRow, {
-          key: 'bin',
-          label: __('settings.useRecycleBin'),
-          hint: __('settings.useRecycleBinHint'),
-          checked: settingsValue('useRecycleBin'),
-          onChange: (value) => updateSetting('useRecycleBin', value),
-        }),
-        binOff
-          ? React.createElement('div', { key: 'binwarn', style: { ...errStyle, marginTop: 0 } },
-              __('settings.binOffWarning'))
-          : null,
 
         // Anything the switch did not cover — groups emptied while it was off,
         // or before it existed — is swept here. The counts are on the row
