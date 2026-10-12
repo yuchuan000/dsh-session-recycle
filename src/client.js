@@ -298,6 +298,8 @@ window.__ModuleLoader__.load({
     // Cleanup for DOM-level wiring that cordis does not own (the sidebar menu
     // observer). Run on dispose so a plugin reload leaves nothing behind.
     const sidebarMenuDisposers = []
+    // Same, for the settings nav icon's style node and observer.
+    const navIconDisposers = []
 
     // --- settings state -----------------------------------------------------------
     //
@@ -3019,6 +3021,96 @@ window.__ModuleLoader__.load({
       }
     }
 
+    // --- settings nav icon ---------------------------------------------------
+
+    // The settings shell picks a row's glyph from a hardcoded list of section
+    // ids (`account`, `models`, `plugins`, …) and falls back to the gear for
+    // everything else — the same gear 通用设置 carries, so this row was
+    // indistinguishable from it. The `settings.section` slot takes no icon; the
+    // shell says so itself ("kept local until the upstream slot accepts icons").
+    //
+    // So the glyph is patched from the DOM: the gear is hidden and a mask paints
+    // ours in its place. Painting with `currentColor` is what keeps it honest —
+    // it follows the row's own label colour, so the active row and both themes
+    // are handled without a second rule.
+    const NAV_ICON_ATTR = 'data-session-recycle-nav-icon'
+    // The host's own trash artwork: same 16px box, same 1.3px stroke as the
+    // glyphs it sits between. Black, because a mask only reads the alpha —
+    // the colour comes from the element it is painted onto.
+    const NAV_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="#000" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="M1.28149 3.88831H14.7187"/>'
+      + '<path d="M5.41602 3.88833V2.47962C5.41602 2.29282 5.52492 2.11366 5.71876 1.98157C5.9126 1.84948 6.17551 1.77527 6.44964 1.77527H9.55053C9.82466 1.77527 10.0876 1.84948 10.2814 1.98157C10.4753 2.11366 10.5842 2.29282 10.5842 2.47962V3.88833"/>'
+      + '<path d="M2.57349 3.88831L3.19366 13.2943C3.21937 13.5502 3.33952 13.7872 3.53065 13.9593C3.72178 14.1313 3.97016 14.2259 4.22729 14.2246H11.7728C12.0299 14.2259 12.2783 14.1313 12.4694 13.9593C12.6605 13.7872 12.7807 13.5502 12.8064 13.2943L13.4266 3.88831"/>'
+      + '<path d="M6.44946 6.98926V11.1238"/>'
+      + '<path d="M9.55054 6.98926V11.1238"/>'
+      + '</svg>'
+
+    function navIconCss() {
+      const mask = `url("data:image/svg+xml,${encodeURIComponent(NAV_ICON_SVG)}")`
+      // The ::before replaces the svg rather than overlaying it: same flex slot,
+      // same 16px, so the label does not shift.
+      return [
+        `button[${NAV_ICON_ATTR}]>svg{display:none}`,
+        `button[${NAV_ICON_ATTR}]::before{content:'';flex:none;width:16px;height:16px;`,
+        `background:currentColor;-webkit-mask:${mask} center/contain no-repeat;`,
+        `mask:${mask} center/contain no-repeat}`,
+      ].join('')
+    }
+
+    /**
+     * The row's own label, or null. Class names are hashed per build, so the
+     * shape — an svg followed by one span — is all there is to recognise a nav
+     * cell by; the label text is what tells ours from the rest.
+     */
+    function navCellLabel(cell) {
+      const kids = cell.children ? Array.from(cell.children) : []
+      const tag = (node) => String(node.tagName ?? '').toLowerCase()
+      const svg = kids.find(node => tag(node) === 'svg')
+      const span = kids.find(node => tag(node) === 'span')
+      if (!svg || !span) return null
+      return String(span.textContent ?? '').trim()
+    }
+
+    function markNavIcons() {
+      const wanted = t('settings.nav')
+      const cells = document.querySelectorAll('nav button')
+      for (let i = 0; i < cells.length; i++) {
+        const cell = cells[i]
+        if (cell.getAttribute(NAV_ICON_ATTR) !== null) continue
+        if (navCellLabel(cell) !== wanted) continue
+        cell.setAttribute(NAV_ICON_ATTR, '')
+      }
+    }
+
+    function installNavIcon() {
+      const style = document.createElement('style')
+      style.setAttribute(NAV_ICON_ATTR, '')
+      style.textContent = navIconCss()
+      // documentElement, not head: the head element is not in every stub, and a
+      // style node on the root still applies.
+      document.documentElement.appendChild(style)
+      navIconDisposers.push(() => style.remove())
+
+      markNavIcons()
+      // Same reason as the sidebar menu: the panel is portalled, so a
+      // body-scoped observer is the reliable hook, coalesced to one pass a
+      // frame.
+      let scheduled = false
+      const schedule = () => {
+        if (scheduled) return
+        scheduled = true
+        const run = () => {
+          scheduled = false
+          try { markNavIcons() } catch { /* never break the UI */ }
+        }
+        if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run)
+        else window.setTimeout(run, 16)
+      }
+      const observer = new MutationObserver(schedule)
+      observer.observe(document.body, { childList: true, subtree: true })
+      navIconDisposers.push(() => observer.disconnect())
+    }
+
     function installSidebarMenu() {
       if (window.__sessionRecycleInstalled) return
       window.__sessionRecycleInstalled = true
@@ -3134,10 +3226,14 @@ window.__ModuleLoader__.load({
       }, ToastHost))
 
       installSidebarMenu()
+      installNavIcon()
 
       // DOM-level wiring is not owned by cordis, so tear it down explicitly.
       ctx.effect(() => () => {
         for (const dispose of sidebarMenuDisposers.splice(0)) {
+          try { dispose() } catch { /* best effort */ }
+        }
+        for (const dispose of navIconDisposers.splice(0)) {
           try { dispose() } catch { /* best effort */ }
         }
         // Let a later mount re-install; otherwise the guard keeps the observer

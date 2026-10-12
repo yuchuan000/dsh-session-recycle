@@ -51,15 +51,42 @@ const drainEvents = (type) => {
 }
 globalThis.CustomEvent = class CustomEvent { constructor(type, init) { this.type = type; this.detail = init?.detail } }
 globalThis.MutationObserver = class MutationObserver { observe() {} disconnect() {} }
+
+// Fake settings-nav rows, so the DOM-level icon patch is exercised: the real
+// panel is portalled into a document this test cannot render. `navCells` is
+// what `document.querySelectorAll('nav button')` answers with.
+const navCells = []
+const createdNodes = []
+const fakeNode = (tagName, textContent = '') => ({ tagName, textContent })
+const fakeNavCell = (label) => ({
+  tagName: 'BUTTON',
+  children: [fakeNode('svg'), fakeNode('span', label)],
+  attrs: Object.create(null),
+  setAttribute(key, value) { this.attrs[key] = value },
+  getAttribute(key) { return key in this.attrs ? this.attrs[key] : null },
+})
 globalThis.document = {
   body: { appendChild() {}, removeChild() {}, contains: () => false },
   documentElement: { appendChild() {} },
   querySelector: () => null,
-  querySelectorAll: () => [],
-  createElement: () => ({ style: {}, dataset: {}, setAttribute() {}, appendChild() {}, remove() {} }),
+  querySelectorAll: (selector) => (selector === 'nav button' ? navCells : []),
+  createElement: () => {
+    const node = {
+      style: {}, dataset: {}, textContent: '', children: [],
+      attrs: Object.create(null),
+      setAttribute(key, value) { this.attrs[key] = value },
+      getAttribute(key) { return key in this.attrs ? this.attrs[key] : null },
+      appendChild() {}, remove() {},
+    }
+    createdNodes.push(node)
+    return node
+  },
   addEventListener() {},
   removeEventListener() {},
 }
+const navIconStyle = () => createdNodes.find(
+  node => node.getAttribute('data-session-recycle-nav-icon') !== null,
+)
 await import(pathToFileURL(join(here, '..', 'src', 'client.js')).href)
 
 // --- the minimal React runtime ----------------------------------------------
@@ -1202,6 +1229,39 @@ await check('页签不带问号；正文区「帮助 ?」承载这一栏的说�
     assert.equal(tip.props.style.top, '100%', '气泡要向下展开')
     assert.equal(tip.props.style.bottom, 'auto', '向下展开时不该再压着 bottom')
   }
+})
+
+await check('设置导航里这一行换成回收站图标，不再与通用设置同为齿轮', async () => {
+  // The shell hardcodes a glyph per section id and falls back to the gear for
+  // anything else — the gear 通用设置 carries. The slot takes no icon, so the
+  // row is patched from the DOM; this is the shape the patch works against.
+  navCells.length = 0
+  const mine = fakeNavCell('会话删除')
+  const other = fakeNavCell('通用设置')
+  const noLabel = { tagName: 'BUTTON', children: [fakeNode('svg')], attrs: Object.create(null),
+    setAttribute(key, value) { this.attrs[key] = value },
+    getAttribute(key) { return key in this.attrs ? this.attrs[key] : null } }
+  navCells.push(mine, other, noLabel)
+
+  makeClient({ sessions: SESSIONS, recycled: RECYCLED })
+
+  const style = navIconStyle()
+  assert.ok(style, '应注入一条样式，否则图标无从替换')
+  const css = String(style.textContent)
+  assert.ok(css.includes('data-session-recycle-nav-icon'), `样式应作用于标记过的行：${css}`)
+  assert.ok(css.includes('>svg{display:none}'), `默认齿轮要隐藏：${css}`)
+  // currentColor is what makes it follow the row's own label colour: the active
+  // row and both themes, without a second rule.
+  assert.ok(css.includes('background:currentColor'), `图标颜色要跟随当前行：${css}`)
+  assert.ok(css.includes('mask:'), `图标应由 mask 画出：${css}`)
+  // The artwork goes in as a data URI, so it is percent-encoded; decode before
+  // looking at the paths.
+  assert.ok(decodeURIComponent(css).includes('M6.44946 6.98926V11.1238'),
+    `应是回收站的图形：${decodeURIComponent(css).slice(0, 160)}`)
+
+  assert.notEqual(mine.getAttribute('data-session-recycle-nav-icon'), null, '本行要被标记')
+  assert.equal(other.getAttribute('data-session-recycle-nav-icon'), null, '别的行不该被标记')
+  assert.equal(noLabel.getAttribute('data-session-recycle-nav-icon'), null, '没有标题文字的按钮不是导航行')
 })
 
 await check('清理按钮不会被旁边的说明挤到换行', async () => {
