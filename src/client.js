@@ -62,31 +62,50 @@ window.__ModuleLoader__.load({
       'settings.nav': '会话删除',
       'settings.config': '配置',
       'settings.configTitle': '删除设置',
-      'settings.configDesc': '这里的勾选改完立即生效，关掉即生效完毕。',
+      'settings.configDesc': '这里的勾选改完立即生效，关掉即生效完毕。每项标题右侧的 ? 是它的说明，悬浮即显。',
       'settings.close': '关闭',
       'settings.behaviour': '删除行为',
+      // What each switch actually does, behind the "?" next to its title: the
+      // rows carry a name and a box, the explanation waits for a hover. Written
+      // as bullet points, one idea each — a paragraph this long pushed the row
+      // it belonged to out of shape.
+      'settings.tip': '说明',
       'settings.useRecycleBin': '删除时移入回收站',
-      'settings.useRecycleBinHint': '关闭后删除不可恢复。默认开启。',
+      'settings.useRecycleBinTip1': '开启（默认）：删除的会话进回收站，可随时还原。',
+      'settings.useRecycleBinTip2': '关闭：删除立即生效且无法还原，每次删除前仍会先确认。',
       'settings.binOffWarning': '⚠ 回收站已关闭：删除将无法还原。',
       'settings.confirmSingleDelete': '删除会话前先确认',
-      'settings.confirmSingleDeleteHint': '关闭后，点删除（单个或所选）直接执行，不再弹确认框。',
+      'settings.confirmSingleDeleteTip1': '开启（默认）：点「删除」先问一次，确认后才真的删。',
+      'settings.confirmSingleDeleteTip2': '关闭：点「删除」（单个或所选）直接执行，不再询问。',
       'settings.confirmForcedHint': '回收站已关闭：删除不可还原，所以始终会先确认。',
+      'settings.confirmForcedTip': '这一项暂时不管用：回收站关着，删掉就找不回来了，所以每次都会先确认一次。',
       'settings.autoPrune': '删除后自动清理空分组与空目录',
-      'settings.autoPruneHint': '勾选后，删除会话时会检查它所属的工作区是否已经空了：空了就连同该分组一起移除，并清掉这次删除留下的空文件夹 —— 分组目录与会话自己的目录（会话在子目录里打开时是另一个名字）都清。项目文件夹与会话日志不受影响。',
+      // Kept to two lines each at the bubble's 260px: the dialog clips its
+      // overflow, and the tallest bubble still has to fit above its own row.
+      'settings.autoPruneTip1': '每删完一个会话，检查它所属的分组是不是已经空了。',
+      'settings.autoPruneTip2': '空了就连同该分组一起移除。',
+      'settings.autoPruneTip3': '同时清掉留下的空文件夹：分组目录与会话自己的目录（子目录里的会话另算）。',
+      'settings.autoPruneTip4': '非空目录和有会话的分组不动，项目文件夹与会话日志不受影响。',
+      'settings.autoPruneTip5': '默认关闭：空分组往往是你还在用的项目。',
       'settings.emptyAutoRemoved': '已一并移除 {n} 个空工作区',
       'settings.emptyAutoDirs': '已一并清理 {n} 个空目录',
       'settings.emptyAutoBoth': '已一并移除 {m} 个空工作区、清理 {d} 个空目录',
       'settings.emptyAutoFailed': '有 {n} 个空工作区移除失败',
       'settings.cleanup': '空分组与空目录',
-      // The relation to the switch above, spelled out: the switch fires only on
+      // The relation to the switch above, spelled out behind the "?" — it used
+      // to sit on the row as a paragraph, where it made the row four lines tall
+      // and pushed the button beside it into wrapping. The switch fires only on
       // this plugin's own deletes, so anything left by another route — or by a
       // delete that ran while the switch was off — is collected here. Without
-      // this sentence the row reads like a duplicate of the switch.
-      'settings.cleanupHint': '手动兜底：清掉以前留下的、或自动清理没赶上的空分组与空目录。上面那个开关只在「本插件删除会话」时触发，用别的方式删掉的会话留下的空壳要在这里收。',
+      // that point the row reads like a duplicate of the switch.
+      'settings.cleanupTip1': '清理没有会话的分组，以及确实空着的会话目录。',
+      'settings.cleanupTip2': '上面的开关只在「本插件删除会话」时触发；用别的方式删掉的会话留下的空壳，要在这里收。',
+      'settings.cleanupTip3': '非空目录和有会话的分组不会动；连按两次和按一次一样。',
       'settings.cleanupCount': '当前有 {dirs} 个空目录、{workspaces} 个空分组',
       'settings.cleanupCountDirs': '当前有 {n} 个空目录，没有空分组',
       'settings.cleanupCountWorkspaces': '当前有 {n} 个空分组，没有空目录',
       'settings.cleanupNone': '没有空分组或空目录',
+      'settings.cleanupUnknown': '没能读到数量',
       'settings.cleanupRun': '清理',
       'settings.cleanupRunning': '清理中…',
       'settings.cleaned': '已清理 {dirs} 个空目录、{workspaces} 个空分组',
@@ -168,27 +187,38 @@ window.__ModuleLoader__.load({
       'settings.nav': 'Session deletion',
       'settings.config': 'Settings',
       'settings.configTitle': 'Deletion settings',
-      'settings.configDesc': 'Every tick here applies immediately — just close this when you are done.',
+      'settings.configDesc': 'Every tick here applies immediately — just close this when you are done. The "?" beside each title holds that setting\'s explanation: hover it.',
       'settings.close': 'Close',
       'settings.behaviour': 'Behaviour',
+      'settings.tip': 'Explanation',
       'settings.useRecycleBin': 'Move deleted sessions to the recycle bin',
-      'settings.useRecycleBinHint': 'When off, deletion cannot be undone. On by default.',
+      'settings.useRecycleBinTip1': 'On (default): a deleted session goes to the bin first, restorable at any time.',
+      'settings.useRecycleBinTip2': 'Off: deletion is immediate and cannot be undone.',
       'settings.binOffWarning': '⚠ The recycle bin is off: deletions cannot be restored.',
       'settings.confirmSingleDelete': 'Confirm before deleting sessions',
-      'settings.confirmSingleDeleteHint': 'When off, deleting — one session or a selection — acts immediately with no confirmation.',
+      'settings.confirmSingleDeleteTip1': 'On (default): clicking delete asks once, then acts on your confirmation.',
+      'settings.confirmSingleDeleteTip2': 'Off: clicking delete — one session or a selection — acts immediately with no confirmation.',
       'settings.confirmForcedHint': 'The recycle bin is off, so a delete cannot be undone and is always confirmed.',
+      'settings.confirmForcedTip': 'This switch is inactive for now: with the bin off a deletion cannot be recovered, so every one of them asks first.',
       'settings.autoPrune': 'Clean up emptied groups and folders after a delete',
-      'settings.autoPruneHint': 'When on, a delete checks whether the workspace the session belonged to is now empty: if it is, the group goes too, along with the folders this deletion emptied — the group\'s folder and the session\'s own (a different name when the session was opened in a sub-directory). The project folder and every session log are untouched.',
+      'settings.autoPruneTip1': 'After a delete, is its group now empty?',
+      'settings.autoPruneTip2': 'If it is, the group goes too.',
+      'settings.autoPruneTip3': 'The folders it emptied go with it: the group\'s and the session\'s own.',
+      'settings.autoPruneTip4': 'Groups with sessions left and non-empty folders are left alone.',
+      'settings.autoPruneTip5': 'Off by default: an empty group is often a project still in use.',
       'settings.emptyAutoRemoved': 'Also removed {n} empty workspace(s)',
       'settings.emptyAutoDirs': 'Also cleaned {n} empty folder(s)',
       'settings.emptyAutoBoth': 'Also removed {m} empty workspace(s) and cleaned {d} empty folder(s)',
       'settings.emptyAutoFailed': '{n} empty workspace(s) could not be removed',
       'settings.cleanup': 'Empty groups and folders',
-      'settings.cleanupHint': 'The manual fallback: sweeps empty groups and folders left over from earlier deletions, or from ones the automatic sweep did not run for. The switch above only fires on a delete this plugin performs, so shells left by any other route are collected here.',
+      'settings.cleanupTip1': 'Sweeps groups with no session left, and genuinely empty session folders.',
+      'settings.cleanupTip2': 'The switch above only fires on a delete this plugin performs; shells left by any other route are collected here.',
+      'settings.cleanupTip3': 'Non-empty folders and groups with sessions left are untouched, and pressing this twice equals pressing it once.',
       'settings.cleanupCount': '{dirs} empty folder(s) and {workspaces} empty group(s)',
       'settings.cleanupCountDirs': '{n} empty folder(s), no empty group',
       'settings.cleanupCountWorkspaces': '{n} empty group(s), no empty folder',
       'settings.cleanupNone': 'Nothing empty',
+      'settings.cleanupUnknown': 'Count unavailable',
       'settings.cleanupRun': 'Clean up',
       'settings.cleanupRunning': 'Cleaning…',
       'settings.cleaned': 'Removed {dirs} empty folder(s) and {workspaces} empty group(s)',
@@ -1098,6 +1128,19 @@ window.__ModuleLoader__.load({
     }
     const ghostBtnOffStyle = { ...ghostBtnStyle, opacity: 0.5, cursor: 'default' }
     const settingLabelStyle = { display: 'block', fontSize: 13, lineHeight: '20px' }
+    /**
+     * A title and its "?" on one line — the explanation moved into the tip.
+     *
+     * It is also the bubble's positioning context, and that is deliberate: the
+     * dialog is 380px wide with `overflow: hidden`, so a bubble hung off the
+     * right of a long title would be clipped. Anchored to the line instead, the
+     * bubble starts at the column's left edge and its `max-width: 100%` keeps it
+     * inside the column by construction.
+     */
+    const settingLabelRowStyle = {
+      position: 'relative',
+      display: 'flex', alignItems: 'center', gap: 6, minWidth: 0,
+    }
     const settingHintStyle = {
       display: 'block', fontSize: 12, lineHeight: '18px', marginTop: 2,
       color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
@@ -1105,6 +1148,71 @@ window.__ModuleLoader__.load({
     const settingRowStyle = {
       display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 0',
     }
+    // The sweep row: a title and count on the left, one button on the right.
+    // The button keeps its own width and never wraps — it used to be squeezed
+    // by the long explanation next to it until "清理" broke onto two lines.
+    const cleanupRowStyle = { display: 'flex', alignItems: 'center', gap: 10 }
+    const cleanupTextStyle = { flex: '1 1 auto', display: 'block', minWidth: 0 }
+    const cleanupGoStyle = { ...ghostBtnStyle, flex: 'none', whiteSpace: 'nowrap' }
+    // --- the "?" tip -------------------------------------------------------------
+    //
+    // Long explanations used to sit under their title as a paragraph. In this
+    // dialog they made every row three lines tall and squeezed the buttons next
+    // to them into wrapping, so the text moved behind a hover: the row keeps its
+    // name, and whoever wants the reasoning asks for it.
+    //
+    // The bubble is the platform's own tooltip surface (`--dsw-alias-tooltip-bg`
+    // is a dark chip in both themes, so the text is white in both), lifted off
+    // the dialog with a border and a shadow instead of floating over it.
+    // The bubble hangs off the row's title line, not off the "?" itself (see
+    // `settingLabelRowStyle`), so the anchor only has to sit still on that line.
+    const tipAnchorStyle = { display: 'inline-flex', flex: 'none' }
+    const tipChipStyle = {
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      width: 14, height: 14, borderRadius: '50%', flex: 'none',
+      fontSize: 10, lineHeight: '14px', fontWeight: 600,
+      border: '1px solid var(--dsw-alias-border-l4, rgba(128,128,128,.5))',
+      color: 'var(--dsw-alias-label-tertiary, #8a8a8e)',
+      cursor: 'help', userSelect: 'none',
+    }
+    const tipChipOnStyle = {
+      ...tipChipStyle,
+      borderColor: 'var(--dsw-alias-interactive-bg-primary, #3b82f6)',
+      color: 'var(--dsw-alias-interactive-bg-primary, #3b82f6)',
+    }
+    // The bubble always opens *upward*. The dialog clips its overflow (380px
+    // wide, `overflow: hidden`), so the only thing that matters is whether a
+    // bubble clears the card's top edge. Measured in the card's own layout —
+    // 380x422 with the description on two lines — every bubble does, with this
+    // much spare air above it: 82px from the first row, 122 from the second,
+    // 66 from the third (the tallest bubble at 192px), 153 from the last. Below
+    // the last row there is only ~79px, so a bubble opening downward would be
+    // cut at the card's bottom edge.
+    const tipBoxStyle = {
+      position: 'absolute', left: 0, bottom: '100%', zIndex: 30,
+      // A fixed 260px, not a percentage: the percentage resolved against the
+      // title line, so a long title squeezed the bubble into a narrow column and
+      // the text grew tall enough to run past the dialog's top edge. At 260px
+      // the widest bubble ends 66px short of the dialog's right edge, and the
+      // viewport cap only matters when the window is too narrow for the dialog
+      // itself (it is `min(380px, 100%)`).
+      width: 260, maxWidth: 'calc(100vw - 140px)',
+      padding: '8px 10px', borderRadius: 8,
+      background: 'var(--dsw-alias-tooltip-bg, #2c2c2e)',
+      // The surface is dark in light and dark themes alike, so the platform's
+      // own tooltip colour is the only readable one — it is `#fff`, spelled as
+      // the token so the bubble keeps tracking it.
+      color: 'var(--dsw-static-neutral-bluish-00, #fff)',
+      border: '1px solid var(--dsw-alias-border-l4, rgba(255,255,255,.18))',
+      boxShadow: '0 8px 24px rgba(0,0,0,.28), 0 2px 6px rgba(0,0,0,.18)',
+      fontSize: 12, lineHeight: '18px', fontWeight: 400,
+      textAlign: 'left', whiteSpace: 'normal',
+      cursor: 'default',
+    }
+    const tipListStyle = {
+      margin: 0, padding: '0 0 0 16px', listStyle: 'disc',
+    }
+    const tipItemStyle = { margin: '2px 0' }
     const dangerOutlineBtnStyle = {
       padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
       border: '1px solid var(--dsw-alias-state-error-primary, #e5484d)',
@@ -1566,9 +1674,69 @@ window.__ModuleLoader__.load({
 
     // --- recycle panel ------------------------------------------------------------
 
-    /** One settings row: label, explanation, and a checkbox. */
+    /**
+     * The "?" that sits next to a setting's title, holding its explanation.
+     *
+     * Hover, not click: reading a row's reasoning is a glance, not a task. The
+     * chip lives inside a `<label>`, where a click is forwarded to the checkbox,
+     * so it stops the event rather than letting a look at the text flip a switch.
+     * Focus does the same as a hover, for the keyboard.
+     */
+    function InfoTip(props) {
+      const __ = props.t || t
+      const [open, setOpen] = useState(false)
+      const points = Array.isArray(props.items)
+        ? props.items.filter((item) => typeof item === 'string' && item.length > 0)
+        : []
+      if (points.length === 0) return null
+      return React.createElement('span', {
+        style: tipAnchorStyle,
+        onMouseEnter: () => setOpen(true),
+        onMouseLeave: () => setOpen(false),
+        onFocus: () => setOpen(true),
+        onBlur: () => setOpen(false),
+      }, [
+        React.createElement('span', {
+          key: 'chip',
+          tabIndex: 0,
+          role: 'button',
+          style: open ? tipChipOnStyle : tipChipStyle,
+          'aria-label': __('settings.tip'),
+          'aria-expanded': open,
+          onClick: (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            setOpen((value) => !value)
+          },
+          onMouseDown: (event) => event.preventDefault(),
+        }, '?'),
+        open
+          ? React.createElement('span', {
+              key: 'tip',
+              role: 'tooltip',
+              style: tipBoxStyle,
+              // Selecting text in the bubble must not reach the <label> around
+              // the row, or a copy would flip the switch it explains.
+              onClick: (event) => { event.preventDefault(); event.stopPropagation() },
+            }, React.createElement('ul', { key: 'points', style: tipListStyle },
+              points.map((point, index) => React.createElement('li', {
+                key: `point:${index}`, style: tipItemStyle,
+              }, point))))
+          : null,
+      ])
+    }
+
+    /**
+     * One settings row: a title with its "?" on the same line, an optional short
+     * note under it, and a checkbox.
+     *
+     * `tip` carries the long explanation and `hint` only what has to be read
+     * without asking — a live count, a warning the row cannot be honoured
+     * without.
+     */
     function SettingRow(props) {
-      const { label, hint, checked, disabled, onChange } = props
+      const __ = props.t || t
+      const { label, hint, tip, checked, disabled, onChange } = props
       return React.createElement('label', {
         style: {
           display: 'flex', alignItems: 'flex-start', gap: 10,
@@ -1580,17 +1748,14 @@ window.__ModuleLoader__.load({
           onChange: (event) => onChange(event.target.checked),
           style: { marginTop: 2, flex: 'none' },
         }),
-        React.createElement('span', { key: 'text', style: { display: 'block' } }, [
-          React.createElement('span', {
-            key: 'label', style: { display: 'block', fontSize: 13, lineHeight: '20px' },
-          }, label),
-          React.createElement('span', {
-            key: 'hint',
-            style: {
-              display: 'block', fontSize: 12, lineHeight: '18px', marginTop: 2,
-              color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
-            },
-          }, hint),
+        React.createElement('span', { key: 'text', style: { display: 'block', minWidth: 0 } }, [
+          React.createElement('span', { key: 'title', style: settingLabelRowStyle }, [
+            React.createElement('span', { key: 'label', style: settingLabelStyle }, label),
+            React.createElement(InfoTip, { key: 'tip', items: tip, t: __ }),
+          ]),
+          hint
+            ? React.createElement('span', { key: 'hint', style: settingHintStyle }, hint)
+            : null,
         ]),
       ])
     }
@@ -1694,7 +1859,8 @@ window.__ModuleLoader__.load({
         React.createElement(SettingRow, {
           key: 'bin',
           label: __('settings.useRecycleBin'),
-          hint: __('settings.useRecycleBinHint'),
+          tip: [__('settings.useRecycleBinTip1'), __('settings.useRecycleBinTip2')],
+          t: __,
           checked: settingsValue('useRecycleBin'),
           onChange: (value) => updateSetting('useRecycleBin', value),
         }),
@@ -1706,39 +1872,62 @@ window.__ModuleLoader__.load({
           key: 'confirm',
           label: __('settings.confirmSingleDelete'),
           // With the bin off the switch cannot be honoured — an irreversible
-          // delete is always asked about — so the row says why instead of
-          // letting the user turn it off and wonder why they were still asked.
-          hint: binOff ? __('settings.confirmForcedHint') : __('settings.confirmSingleDeleteHint'),
+          // delete is always asked about — so the row says why in place, where
+          // it cannot be missed, instead of letting the user turn it off and
+          // wonder why they were still asked.
+          hint: binOff ? __('settings.confirmForcedHint') : undefined,
+          tip: binOff
+            ? [__('settings.confirmForcedTip')]
+            : [__('settings.confirmSingleDeleteTip1'), __('settings.confirmSingleDeleteTip2')],
+          t: __,
           checked: settingsValue('confirmSingleDelete'),
           onChange: (value) => updateSetting('confirmSingleDelete', value),
         }),
         React.createElement(SettingRow, {
           key: 'prune',
           label: __('settings.autoPrune'),
-          hint: __('settings.autoPruneHint'),
+          tip: [
+            __('settings.autoPruneTip1'),
+            __('settings.autoPruneTip2'),
+            __('settings.autoPruneTip3'),
+            __('settings.autoPruneTip4'),
+            __('settings.autoPruneTip5'),
+          ],
+          t: __,
           checked: settingsValue('autoPruneEmpty'),
           onChange: (value) => updateSetting('autoPruneEmpty', value),
         }),
 
         // Anything the switch did not cover — groups emptied while it was off,
-        // or before it existed — is swept here. The counts are on the row
-        // because the user cannot otherwise tell whether a sweep is worth
-        // pressing, and a disabled button with "nothing empty" next to it says
-        // exactly that.
+        // or before it existed — is swept here. The counts stay on the row: the
+        // user cannot otherwise tell whether a sweep is worth pressing, and a
+        // disabled button with "nothing empty" next to it says exactly that.
+        // The reasoning is behind the "?" like every other row's.
         React.createElement('div', { key: 'sep', style: separatorStyle }),
-        React.createElement('div', { key: 'cleanup', style: { ...settingRowStyle, padding: 0 } }, [
-          React.createElement('span', { key: 'text', style: { flex: '1 1 auto', display: 'block' } }, [
-            React.createElement('span', { key: 'label', style: settingLabelStyle }, __('settings.cleanup')),
+        React.createElement('div', { key: 'cleanup', style: cleanupRowStyle }, [
+          React.createElement('span', { key: 'text', style: cleanupTextStyle }, [
+            React.createElement('span', { key: 'title', style: settingLabelRowStyle }, [
+              React.createElement('span', { key: 'label', style: settingLabelStyle }, __('settings.cleanup')),
+              // Above the row: this is the last thing in the dialog, so a bubble
+              // hanging below it would open past the dialog's own edge.
+              React.createElement(InfoTip, {
+                key: 'tip',
+                t: __,
+                items: [
+                  __('settings.cleanupTip1'),
+                  __('settings.cleanupTip2'),
+                  __('settings.cleanupTip3'),
+                ],
+              }),
+            ]),
             React.createElement('span', { key: 'hint', style: settingHintStyle },
-              cleanupSummary.length === 0
-                ? __('settings.cleanupHint')
-                : `${cleanupSummary}｜${__('settings.cleanupHint')}`),
+              cleanupSummary.length === 0 ? __('settings.cleanupUnknown') : cleanupSummary),
           ]),
           React.createElement('button', {
             key: 'go',
             type: 'button',
             disabled: pruning || cleanupOff,
-            style: pruning || cleanupOff ? ghostBtnOffStyle : ghostBtnStyle,
+            style: pruning || cleanupOff ? ghostBtnOffStyle : cleanupGoStyle,
             onClick: onCleanup,
           }, pruning ? __('settings.cleanupRunning') : __('settings.cleanupRun')),
         ]),

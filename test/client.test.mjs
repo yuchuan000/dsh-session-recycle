@@ -230,6 +230,35 @@ function parentOf(tree, target, parent = null) {
   return null
 }
 
+/**
+ * The "?" chip of the setting whose title contains `title`.
+ *
+ * Found through the title row rather than by position: every row carries one,
+ * and what the assertions care about is that a given row's chip is *on* that
+ * row — next to the name it explains.
+ */
+const tipChip = (tree, title) => nodes(tree, (node) => {
+  if (node.tag !== 'span' || node.props.role !== 'button') return false
+  const anchor = parentOf(tree, node)
+  const line = anchor ? parentOf(tree, anchor) : null
+  return Boolean(line) && textOf(line).includes(title)
+})[0]
+/**
+ * The element that watches the hover — the chip's own parent.
+ *
+ * Enter/leave live on the anchor rather than on the chip so that moving the
+ * pointer from the chip into the open bubble is not a leave; the chip itself
+ * only handles the click.
+ */
+const tipAnchor = (tree, title) => {
+  const chip = tipChip(tree, title)
+  return chip ? parentOf(tree, chip) : undefined
+}
+/** The open bubble, if any. Only one can be open at a time. */
+const tooltipOf = (tree) => nodes(tree, (node) => node.props.role === 'tooltip')[0]
+/** The label a chip hangs off — the row's title line, for layout assertions. */
+const tipLine = (tree, chip) => parentOf(tree, parentOf(tree, chip))
+
 const byTag = (tree, tag) => nodes(tree, (node) => node.tag === tag)
 const buttons = (tree) => byTag(tree, 'button')
 const buttonExact = (tree, text) => buttons(tree).find((node) => textOf(node).trim() === text)
@@ -988,13 +1017,120 @@ await check('回收站关闭时，即使关掉「先确认」也仍要问', asyn
 
 await check('回收站关闭时，配置里那行说明为什么关不掉', async () => {
   const client = makeClient({ settings: { useRecycleBin: false } })
-  const { config } = await openConfig(client)
+  const { config, panel } = await openConfig(client)
   const text = textOf(config)
   assert.ok(text.includes('始终会先确认'), `应当说明原因，而不是让人以为设置失灵：${text.slice(0, 400)}`)
-  // The reversible case keeps the ordinary hint.
+  // The reason is the one thing on the row that may not hide behind a hover:
+  // the switch looks broken otherwise.
+  assert.equal(tooltipOf(config), undefined, '不能非悬浮就展开气泡')
+
+  // With the bin on the row keeps the ordinary explanation — in the tip, since
+  // it is a policy rather than a state.
   const onClient = makeClient({ settings: { confirmSingleDelete: false } })
-  const { config: onConfig } = await openConfig(onClient)
-  assert.ok(textOf(onConfig).includes('直接执行'), `回收站开着时说的是普通行为：${textOf(onConfig).slice(0, 400)}`)
+  const on = await openConfig(onClient)
+  assert.ok(!textOf(on.config).includes('始终会先确认'), '回收站开着时不该说这条')
+  assert.ok(!textOf(on.config).includes('直接执行'), `普通解释也不该常驻版面：${textOf(on.config).slice(0, 400)}`)
+  tipAnchor(on.config, '删除会话前先确认').props.onMouseEnter()
+  await onClient.runtime.settle(on.panel)
+  const tip = tooltipOf(await configTree(onClient))
+  assert.ok(tip && textOf(tip).includes('直接执行'), `悬浮后才说普通行为：${tip && textOf(tip)}`)
+})
+
+// --- 4b. the "?" tips --------------------------------------------------------
+
+await check('问号挂在每个设置标题右侧，默认不占版面', async () => {
+  const client = makeClient({})
+  const { config } = await openConfig(client)
+  assert.ok(config, '配置按钮没有打开弹窗')
+  const resting = textOf(config)
+  // The long ones are gone from the layout; the names stay.
+  assert.ok(!resting.includes('检查它所属的分组'), `解释不该常驻版面：${resting.slice(0, 400)}`)
+  assert.ok(!resting.includes('手动兜底'), `清理那行的解释也不该常驻：${resting.slice(0, 400)}`)
+  assert.equal(tooltipOf(config), undefined, '没有悬浮时不该有气泡')
+
+  for (const title of ['删除时移入回收站', '删除会话前先确认', '删除后自动清理空分组与空目录', '空分组与空目录']) {
+    const chip = tipChip(config, title)
+    assert.ok(chip, `「${title}」标题右侧缺少问号`)
+    assert.equal(textOf(chip), '?', '问号本身就是图标文字')
+    assert.ok(
+      textOf(tipLine(config, chip)).includes(title),
+      `问号必须和标题同一行：${textOf(tipLine(config, chip))}`,
+    )
+  }
+})
+
+await check('悬浮问号展开分点说明，气泡自带背景与阴影', async () => {
+  const client = makeClient({})
+  const { config, panel } = await openConfig(client)
+  tipAnchor(config, '删除后自动清理空分组与空目录').props.onMouseEnter()
+  await client.runtime.settle(panel)
+  const tip = tooltipOf(await configTree(client))
+  assert.ok(tip, '悬浮后应当出现气泡')
+  const points = nodes(tip, (node) => node.tag === 'li')
+  assert.ok(points.length >= 3, `长解释要分点：只有 ${points.length} 点`)
+  const said = textOf(tip)
+  assert.ok(said.includes('检查它所属的分组'), `气泡里要有原因：${said}`)
+  assert.ok(said.includes('空文件夹'), `气泡里要有目录那一条：${said}`)
+  assert.ok(tip.props.style.background, '气泡要有背景色，把文字和页面隔开')
+  assert.ok(tip.props.style.boxShadow, '气泡要有阴影')
+  assert.notEqual(tip.props.style.position, 'static', '气泡要浮在内容之上')
+  // The dialog is 380px wide with `overflow: hidden`. The bubble is a fixed
+  // 260px — measured to end 66px short of the dialog's right edge — with only a
+  // viewport cap for windows too narrow to hold the dialog itself. A percentage
+  // here resolved against the title line and squeezed the bubble narrow enough
+  // to grow past the dialog's top edge.
+  assert.equal(tip.props.style.position, 'absolute', '气泡相对标题行定位')
+  assert.equal(tip.props.style.width, 260, '宽度固定，不跟着标题长短变')
+  assert.match(String(tip.props.style.maxWidth), /^calc\(100vw/, '只有视口过窄时才收窄')
+  const opened = await configTree(client)
+  const chip = tipChip(opened, '删除后自动清理空分组与空目录')
+  assert.equal(parentOf(opened, chip).props.style.position, undefined, '定位上下文不该挂在问号上')
+  assert.equal(tipLine(opened, chip).props.style.position, 'relative', '定位上下文由标题行提供')
+  // Vertical side is not a per-row choice: measured in the dialog's own layout,
+  // every bubble clears the card's top edge when it opens upward (66px to spare
+  // in the tightest case, the 5-point tip on row three), while below the last
+  // row there is only ~79px — less than the 152px bubble that hangs off it.
+  assert.equal(tip.props.style.bottom, '100%', '气泡一律向上展开，向下会被弹窗下沿裁掉')
+})
+
+await check('鼠标移开后气泡收起；点问号不会顺手勾上开关', async () => {
+  const client = makeClient({})
+  const { config, panel } = await openConfig(client)
+  tipAnchor(config, '删除时移入回收站').props.onMouseEnter()
+  await client.runtime.settle(panel)
+  let tree = await configTree(client)
+  assert.ok(tooltipOf(tree), '悬浮时应当展开')
+
+  let prevented = 0
+  let stopped = 0
+  tipChip(tree, '删除时移入回收站').props.onClick({
+    preventDefault: () => { prevented += 1 },
+    stopPropagation: () => { stopped += 1 },
+  })
+  assert.equal(prevented, 1, '不阻止默认行为，外面的 <label> 会把点击转给复选框')
+  assert.equal(stopped, 1, '事件不该冒泡到那一行')
+
+  tree = await configTree(client)
+  tipAnchor(tree, '删除时移入回收站').props.onMouseLeave()
+  await client.runtime.settle(panel)
+  assert.equal(tooltipOf(await configTree(client)), undefined, '移开应当收起')
+})
+
+await check('清理按钮不会被旁边的说明挤到换行', async () => {
+  const client = makeClient({
+    emptyDirs: ['--d-a--'],
+    emptyGroups: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj' }],
+  })
+  const { config } = await openConfig(client)
+  const clean = buttonExact(config, '清理')
+  assert.ok(clean, `缺少清理按钮：${reachable(config)}`)
+  assert.equal(clean.props.style.flex, 'none', '按钮必须保住自己的宽度，不能被文字压缩')
+  assert.equal(clean.props.style.whiteSpace, 'nowrap', '按钮里的文字不许折行')
+  // The count stays on the row — that is what decides whether to press it.
+  assert.ok(
+    textOf(config).includes('当前有 1 个空目录、1 个空分组'),
+    `数量应当在行内可见：${textOf(config).slice(0, 300)}`,
+  )
 })
 
 // --- 5. the recycle tab ------------------------------------------------------
