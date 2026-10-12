@@ -72,6 +72,10 @@ window.__ModuleLoader__.load({
       // as bullet points, one idea each — a paragraph this long pushed the row
       // it belonged to out of shape.
       'settings.tip': '说明',
+      // The pane's own heading. 「帮助」 rather than 「说明」 because it sits over
+      // the body, not inside a settings row: it answers 「这一栏是干什么的」,
+      // which is a different question from 「这一项开关是什么意思」.
+      'settings.help': '帮助',
       'settings.useRecycleBin': '删除时移入回收站',
       'settings.useRecycleBinTip1': '开启（默认）：删除的会话进回收站，可随时还原。',
       'settings.useRecycleBinTip2': '关闭：删除立即生效且无法还原，每次删除前仍会先确认。',
@@ -195,6 +199,7 @@ window.__ModuleLoader__.load({
       'settings.close': 'Close',
       'settings.behaviour': 'Behaviour',
       'settings.tip': 'Explanation',
+      'settings.help': 'Help',
       'settings.useRecycleBin': 'Move deleted sessions to the recycle bin',
       'settings.useRecycleBinTip1': 'On (default): a deleted session goes to the bin first, restorable at any time.',
       'settings.useRecycleBinTip2': 'Off: deletion is immediate and cannot be undone.',
@@ -1027,22 +1032,13 @@ window.__ModuleLoader__.load({
     }
     const tabBaseStyle = {
       display: 'inline-flex', alignItems: 'center', gap: 6,
-      padding: '6px 10px', borderRadius: '6px 6px 0 0',
+      // The tab's underline has to sit 1px into the strip's own border, so the
+      // tab is pulled down by that much rather than the strip being pushed up.
+      padding: '6px 10px', marginBottom: -1, borderRadius: '6px 6px 0 0',
       border: 'none', borderBottom: '2px solid transparent',
       background: 'transparent', cursor: 'pointer',
       fontSize: 13, lineHeight: '20px',
       color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
-    }
-    // A tab and its "?" on one line. The negative bottom margin moved here from
-    // the tab itself: the tab's underline has to sit 1px into the strip's own
-    // border, and the wrapper is now what the flex line measures.
-    // `position: relative` is what the tab's "?" hangs its bubble off. Without
-    // it the bubble is placed against the nearest positioned ancestor further
-    // up — measured in the real layout, that put it 116px below the viewport
-    // rather than under the tab it describes.
-    const tabItemStyle = {
-      position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 4,
-      marginBottom: -1,
     }
     /** The open tab: same shape as the idle one, marked rather than disabled. */
     const tabOnStyle = {
@@ -1238,7 +1234,7 @@ window.__ModuleLoader__.load({
     // The settings dialog's own explanation: a caption-shaped line holding only
     // a "?" — the sentence that used to be the description paragraph sits in it.
     // It is *inside* the card, so it opens downward, into the body.
-    const aboutRowStyle = {
+    const tipRowStyle = {
       position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 6,
       fontSize: 12, lineHeight: '18px',
       color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
@@ -1885,7 +1881,7 @@ window.__ModuleLoader__.load({
       // It is not hung off the title itself: `Modal` copies `title` into the
       // dialog's `aria-label`, so a node there would announce the dialog as
       // "[object Object]" to a screen reader.
-      const about = React.createElement('span', { key: 'about', style: aboutRowStyle }, [
+      const about = React.createElement('span', { key: 'about', style: tipRowStyle }, [
         React.createElement('span', { key: 'l' }, __('settings.tip')),
         React.createElement(InfoTip, {
           key: 'tip', t: __, placement: 'down', items: [__('settings.configAbout')],
@@ -2085,21 +2081,13 @@ window.__ModuleLoader__.load({
      */
     function SettingsTabs(props) {
       const __ = props.__ || t
+      // No "?" on the tab itself. Each pane explains itself under a 「帮助 ?」
+      // heading in the body, where the answer is also *scoped*: the tab strip is
+      // always showing every tab, so a bubble hung on a tab would be explaining
+      // a pane the reader has not opened.
       const tabs = [
-        {
-          id: TAB_SESSIONS,
-          label: __('settings.sessions'),
-          tip: [
-            __('settings.sessionsTip1'),
-            __('settings.sessionsTip2'),
-            __('settings.sessionsTip3'),
-          ],
-        },
-        {
-          id: TAB_RECYCLE,
-          label: __('settings.recycle'),
-          tip: [__('settings.recycleTip1'), __('settings.recycleTip2')],
-        },
+        { id: TAB_SESSIONS, label: __('settings.sessions') },
+        { id: TAB_RECYCLE, label: __('settings.recycle') },
       ]
       return React.createElement('div', { style: tabStripStyle }, [
         React.createElement('div', {
@@ -2110,31 +2098,23 @@ window.__ModuleLoader__.load({
         }, tabs.map(tab => {
           const count = props.counts?.[tab.id]
           const on = props.tab === tab.id
-          // The "?" is a *sibling* of the tab button, not a child: a button may
-          // not contain another button, and as a sibling a click on it cannot be
-          // mistaken for a request to switch tabs.
-          return React.createElement('span', { key: tab.id, style: tabItemStyle }, [
-            React.createElement('button', {
-              key: 'tab',
-              type: 'button',
-              role: 'tab',
-              'data-tab': tab.id,
-              'aria-selected': on,
-              style: on ? tabOnStyle : tabBaseStyle,
-              onClick: () => props.onTab?.(tab.id),
-            }, [
-              React.createElement('span', { key: 'l' }, tab.label),
-              // Missing until the pane has a number to give: a badge reading "0"
-              // during the first load would be a claim the client cannot make yet.
-              typeof count === 'number'
-                ? React.createElement('span', {
-                    key: 'n', style: tabBadgeStyle, title: __('settings.tabCount', { n: count }),
-                  }, String(count))
-                : null,
-            ]),
-            React.createElement(InfoTip, {
-              key: 'tip', t: __, placement: 'down', label: tab.label, items: tab.tip,
-            }),
+          return React.createElement('button', {
+            key: tab.id,
+            type: 'button',
+            role: 'tab',
+            'data-tab': tab.id,
+            'aria-selected': on,
+            style: on ? tabOnStyle : tabBaseStyle,
+            onClick: () => props.onTab?.(tab.id),
+          }, [
+            React.createElement('span', { key: 'l' }, tab.label),
+            // Missing until the pane has a number to give: a badge reading "0"
+            // during the first load would be a claim the client cannot make yet.
+            typeof count === 'number'
+              ? React.createElement('span', {
+                  key: 'n', style: tabBadgeStyle, title: __('settings.tabCount', { n: count }),
+                }, String(count))
+              : null,
           ])
         })),
         React.createElement('button', {
@@ -2330,14 +2310,27 @@ window.__ModuleLoader__.load({
       const deleteIds = [...picked]
 
       return React.createElement('div', null, [
-        // No heading and no hint: the tab right above this line carries both the
-        // name and — on its "?" — what the page is for, so a paragraph here
-        // would only push the first row down.
-        //
+        // 「帮助 ?」: what this pane is for, under a heading so the question is
+        // discoverable without hovering the tab strip. It opens downward — there
+        // is nothing above it but the tab strip.
+        React.createElement('span', { key: 'help', style: tipRowStyle }, [
+          React.createElement('span', { key: 'l' }, __('settings.help')),
+          React.createElement(InfoTip, {
+            // Named, so this chip does not announce itself as plain 「说明」 like
+            // the dialog's own one.
+            key: 'tip', t: __, placement: 'down', label: __('settings.help'),
+            items: [
+              __('settings.sessionsTip1'),
+              __('settings.sessionsTip2'),
+              __('settings.sessionsTip3'),
+            ],
+          }),
+        ]),
+
         // Toolbar in two rows: the filter gets the whole first line, and the row
         // under it starts with the select-all box — flush left, in the same
         // column as every row's own checkbox.
-        React.createElement('div', { key: 'filterRow', style: { ...filterRowStyle, marginTop: 8 } },
+        React.createElement('div', { key: 'filterRow', style: filterRowStyle },
           React.createElement('input', {
             type: 'text',
             value: filter,
@@ -2729,9 +2722,19 @@ window.__ModuleLoader__.load({
       const selected = picked.size
 
       return React.createElement('div', null, [
-        // Same as the session list: the tab above carries the name, and its "?"
-        // carries what the page is for. Neither pane repeats its title here.
-        React.createElement('div', { key: 'filterRow', style: { ...filterRowStyle, marginTop: 8 } },
+        // Same 「帮助 ?」 heading as the session list, with the bin's own answer
+        // behind it.
+        React.createElement('span', { key: 'help', style: tipRowStyle }, [
+          React.createElement('span', { key: 'l' }, __('settings.help')),
+          React.createElement(InfoTip, {
+            key: 'tip', t: __, placement: 'down', label: __('settings.help'),
+            items: [__('settings.recycleTip1'), __('settings.recycleTip2')],
+          }),
+        ]),
+
+        // Two rows, same as the session list's: filter on its own line, then the
+        // select-all box at the far left of the action row.
+        React.createElement('div', { key: 'filterRow', style: filterRowStyle },
           React.createElement('input', {
             type: 'text',
             value: filter,

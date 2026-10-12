@@ -1157,36 +1157,49 @@ await check('弹窗自己的说明挂在标题下方那个问号里，不再是�
   assert.equal(tip.props.style.bottom, 'auto', '向下开时不该再压着 bottom')
 })
 
-await check('两个页签各带一个问号，页内不再常驻说明', async () => {
+await check('页签不带问号；正文区「帮助 ?」承载这一栏的说明，内容随栏切换', async () => {
   const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED })
   const panel = panelOf(client)
   const resting = textOf(await tabTree(client))
   for (const said of ['勾选后一次删除多个会话', '由本插件删除、且仍可还原的会话']) {
-    assert.ok(!resting.includes(said), `页签说明不该占版面：${said}｜${resting.slice(0, 300)}`)
+    assert.ok(!resting.includes(said), `栏说明不该占版面：${said}｜${resting.slice(0, 300)}`)
   }
 
-  const cases = [['会话列表', '一次删除多个会话'], ['回收站', '仍可还原的会话']]
+  const cases = [['sessions', '一次删除多个会话'], ['recycle', '仍可还原的会话']]
   for (const [name, said] of cases) {
     // One pointer, one chip: leaving every other "?" first is what the mouse
     // does on the way over, and without it the previous bubble stays in the
     // tree for `tooltipOf` to find first.
-    for (const anchor of tipAnchors(await tabTree(client))) anchor.props.onMouseLeave?.()
+    for (const anchor of tipAnchors(await tabTree(client, name))) anchor.props.onMouseLeave?.()
     await client.runtime.settle(panel)
-    const tree = await tabTree(client)
-    const chip = tipChip(tree, name)
-    assert.ok(chip, `「${name}」页签右侧缺少问号`)
-    // Without a positioning context on the tab item the bubble is placed against
+    const tree = await tabTree(client, name)
+
+    // The strip is not where the explanation lives: every tab is always on it,
+    // so a bubble hung on one would be explaining a pane that is not open.
+    const strip = nodes(tree, (node) => node.props?.role === 'tablist')[0]
+    assert.ok(strip, '页签条应存在')
+    assert.equal(nodes(strip, (node) => node.props?.role === 'button').length, 0,
+      '页签条上不该挂问号')
+
+    // A pane stays in the tree once visited — the inactive one is only hidden
+    // (`display: none`) — and both have a 「帮助 ?」, so the search has to be
+    // scoped to the pane under test or it finds the other one's.
+    const pane = paneOf(tree, name)
+    assert.ok(pane, `找不到 ${name} 面板`)
+    const chip = tipChip(pane, '帮助')
+    assert.ok(chip, `正文区缺少「帮助 ?」：${textOf(pane).slice(0, 300)}`)
+    // Without a positioning context on the row the bubble is placed against
     // whatever positioned ancestor is further up — measured, that put it 116px
-    // below the viewport instead of under the tab.
-    assert.equal(tipLine(tree, chip).props.style.position, 'relative',
-      `「${name}」的问号要有自己的定位上下文`)
-    assert.equal(tooltipOf(tree), undefined, `「${name}」不该没悬浮就展开`)
-    tipAnchor(tree, name).props.onMouseEnter()
+    // below the viewport instead of under the row.
+    assert.equal(tipLine(pane, chip).props.style.position, 'relative',
+      '「帮助 ?」要有自己的定位上下文')
+    assert.equal(tooltipOf(pane), undefined, '不该没悬浮就展开')
+    tipAnchor(pane, '帮助').props.onMouseEnter()
     await client.runtime.settle(panel)
-    const tip = tooltipOf(await tabTree(client))
-    assert.ok(tip && textOf(tip).includes(said), `「${name}」的问号要说出自己的说明：${tip && textOf(tip)}`)
-    // 页签在最上面，向上开没有空间。
-    assert.equal(tip.props.style.top, '100%', `「${name}」的气泡要向下展开`)
+    const tip = tooltipOf(paneOf(await tabTree(client, name), name))
+    assert.ok(tip && textOf(tip).includes(said), `「${name}」栏的帮助要说这一栏的事：${tip && textOf(tip)}`)
+    // 正文区第一行，上方只有页签条，向上开没有空间。
+    assert.equal(tip.props.style.top, '100%', '气泡要向下展开')
     assert.equal(tip.props.style.bottom, 'auto', '向下展开时不该再压着 bottom')
   }
 })
