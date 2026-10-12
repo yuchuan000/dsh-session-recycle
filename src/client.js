@@ -330,6 +330,48 @@ window.__ModuleLoader__.load({
     function openConfigDialog() { setConfigDialogOpen(true) }
     function closeConfigDialog() { setConfigDialogOpen(false) }
 
+    // --- tab counts ----------------------------------------------------------------
+    //
+    // How many rows each tab is holding, shared by the tab strip and the panes.
+    //
+    // The bin's number cannot be reported by its own pane: the badge is on
+    // screen from the moment the page opens, and that pane is not mounted until
+    // someone crosses to it — which is exactly the moment the badge stops being
+    // needed as an invitation. It is also changed from outside the pane, since
+    // deleting with the bin on feeds it. A module-level cell covers both: the
+    // strip reads it, whoever changes the list writes it, and a null ("not read
+    // yet") renders as no badge rather than as a claim of zero.
+    const tabCounts = { [TAB_SESSIONS]: null, [TAB_RECYCLE]: null, listeners: new Set() }
+
+    function tabCountSubscribe(listener) {
+      tabCounts.listeners.add(listener)
+      return () => { tabCounts.listeners.delete(listener) }
+    }
+
+    function setTabCount(id, n) {
+      const next = typeof n === 'number' && Number.isFinite(n) ? n : null
+      if (tabCounts[id] === next) return
+      tabCounts[id] = next
+      for (const listener of [...tabCounts.listeners]) {
+        try { listener() } catch { /* a broken subscriber never blocks others */ }
+      }
+    }
+
+    /**
+     * Re-read the recycle bin's length.
+     *
+     * Called when the page opens — so the badge is right before the pane has
+     * ever mounted — and after a deletion that fed the bin. A failed read keeps
+     * the last known number: stale beats blank on a count that is only ever an
+     * invitation.
+     */
+    async function refreshRecycleCount() {
+      try {
+        const rows = await fetchRecycled()
+        if (Array.isArray(rows)) setTabCount(TAB_RECYCLE, rows.length)
+      } catch { /* the badge keeps whatever it last knew */ }
+    }
+
     function fallbackLang() {
       if (typeof navigator === 'undefined') return 'zh'
       for (const tag of (navigator.languages || []).concat([navigator.language])) {
@@ -1179,6 +1221,10 @@ window.__ModuleLoader__.load({
       }
       refreshSidebar(sessionId, wasCurrent)
       reportAutoRemoval(result, translate)
+      // A deletion with the bin on feeds the settings page's tab badge, which
+      // usually is not even open. Silent: the badge is an invitation, not a
+      // report the user is waiting on.
+      if (result?.permanent !== true) refreshRecycleCount()
       return result
     }
 
@@ -1505,31 +1551,31 @@ window.__ModuleLoader__.load({
       // Which panes have been opened at least once. `Set` because it is only
       // ever added to: going back to a tab must not unload the other one.
       const [mounted, setMounted] = useState(() => new Set([TAB_SESSIONS]))
-      // Row counts per tab, reported up by the panes. Absent until a pane has
-      // read its list, which is why the badge renders nothing rather than 0.
-      const [counts, setCounts] = useState({})
+      // Re-render when either list changes length. The numbers themselves live
+      // in the module cell, not here: the bin's is needed before its pane is
+      // mounted, and is changed by deletions taken in the other pane.
+      const [, forceRender] = useState(0)
+      const counts = { [TAB_SESSIONS]: tabCounts[TAB_SESSIONS], [TAB_RECYCLE]: tabCounts[TAB_RECYCLE] }
+
+      useEffect(() => {
+        const sync = () => forceRender(n => n + 1)
+        const off = tabCountSubscribe(sync)
+        // Seed the bin's badge without mounting its pane: this is the whole
+        // point of the badge, and the pane is not coming until someone clicks.
+        refreshRecycleCount()
+        return off
+      }, [])
 
       const onTab = useCallback((id) => {
         setTab(id)
         setMounted((prev) => (prev.has(id) ? prev : new Set(prev).add(id)))
       }, [])
 
-      // Stable identity: the panes call this from an effect keyed on its
-      // identity, so a fresh function per render would re-run it forever.
-      const onCount = useCallback((id, n) => {
-        setCounts((prev) => (prev[id] === n ? prev : { ...prev, [id]: n }))
-      }, [])
-
       const onOpenConfig = useCallback(() => { openConfigDialog() }, [])
 
-      // One bound reporter per tab, created unconditionally: a hook called from
-      // inside the render map below would change the hook order the moment a
-      // pane is filtered out of it.
-      const reportSessions = useCountReporter(TAB_SESSIONS, onCount)
-      const reportRecycle = useCountReporter(TAB_RECYCLE, onCount)
       const panes = [
-        { id: TAB_SESSIONS, pane: SessionsPane, onCount: reportSessions },
-        { id: TAB_RECYCLE, pane: RecyclePane, onCount: reportRecycle },
+        { id: TAB_SESSIONS, pane: SessionsPane },
+        { id: TAB_RECYCLE, pane: RecyclePane },
       ]
 
       return React.createElement('div', { style: { padding: '4px 0 8px' } }, [
@@ -1550,24 +1596,8 @@ window.__ModuleLoader__.load({
             key: entry.id,
             'data-pane': entry.id,
             style: { display: tab === entry.id ? undefined : 'none' },
-          }, React.createElement(entry.pane, {
-            onCount: entry.onCount,
-            __,
-          }))),
+          }, React.createElement(entry.pane, { __ }))),
       ])
-    }
-
-    /**
-     * Bind a pane's count callback to its own tab id.
-     *
-     * A plain closure would be a new function on every parent render, and the
-     * pane reports from an effect keyed on the callback — so the pane would
-     * report, the parent would re-render, the callback would change, and the
-     * pair would spin. This is still a closure, but a `useCallback` that only
-     * depends on the (stable) reporter and the id, so the identity holds.
-     */
-    function useCountReporter(id, report) {
-      return useCallback((n) => report(id, n), [id, report])
     }
 
     /**
@@ -1622,9 +1652,8 @@ window.__ModuleLoader__.load({
     /**
      * The session list: tick rows, delete them in one batch.
      *
-     * A pane of `SettingsPanel`, not a page of its own — it is handed a
-     * `onCount` callback to report its row count up to the tab strip and owns
-     * nothing else about the page.
+     * A pane of `SettingsPanel`, not a page of its own — it publishes its row
+     * count for the tab strip and owns nothing else about the page.
      */
     function SessionsPane(props) {
       const __ = props.__ || t
@@ -1645,17 +1674,16 @@ window.__ModuleLoader__.load({
 
       useEffect(() => settingsSubscribe(() => forceRender(n => n + 1)), [])
 
-      // The tab badge. Reported from an effect keyed on the number and the
-      // callback, not during render: the parent owns the value being written, so
-      // writing it mid-render would be a render-time update of another
-      // component's state. Nothing is reported until the first read lands, so
-      // the badge cannot flash a "0" it is about to contradict; a later refresh
-      // leaves the last known number up while it runs.
-      const onCount = props.onCount
+      // The tab badge. Published from an effect keyed on the number, not during
+      // render: the tab strip is another component's state, and writing it
+      // mid-render would be a render-time update. Nothing is published until
+      // the first read lands, so the badge cannot flash a "0" it is about to
+      // contradict; a later refresh leaves the last known number up while it
+      // runs.
       useEffect(() => {
         if (loading) return
-        onCount?.(sessions.length)
-      }, [onCount, loading, sessions.length])
+        setTabCount(TAB_SESSIONS, sessions.length)
+      }, [loading, sessions.length])
 
       /**
        * Re-read the store's session list.
@@ -1762,6 +1790,10 @@ window.__ModuleLoader__.load({
           setPicked(new Set())
           await refresh(true)
           refreshSidebar(deadCurrent ? String(current) : ids[0], deadCurrent)
+          // Part of this batch may have landed in the bin, which the badge above
+          // is counting. The host says per entry where each one went, so the
+          // re-read happens only when at least one of them went there.
+          if (result.deleted.some(entry => entry.recycled === true)) refreshRecycleCount()
           // One banner, not two: the sweep's own "removed 3 groups" toast would
           // be replaced by the delete count a line later, so the number that
           // explains why a sidebar group vanished has to ride along with it.
@@ -1984,12 +2016,14 @@ window.__ModuleLoader__.load({
       const [page, setPage] = useState(0)
       const [pageSize, setPageSize] = useState(() => readPageSize())
 
-      // The tab badge, same contract as the session list's.
-      const onCount = props.onCount
+      // The tab badge, same contract as the session list's — except that this
+      // pane is not what usually puts the first number there: the strip seeds it
+      // when the page opens, so the count is up before anyone clicks over. The
+      // pane takes over from the moment it reads its own list.
       useEffect(() => {
         if (loading) return
-        onCount?.(entries.length)
-      }, [onCount, loading, entries.length])
+        setTabCount(TAB_RECYCLE, entries.length)
+      }, [loading, entries.length])
 
       /**
        * Re-read the recycle list.

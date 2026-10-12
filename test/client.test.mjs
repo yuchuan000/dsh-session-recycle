@@ -458,9 +458,13 @@ function makeClient({
       })
     }
     if (path === '/__session-recycle/delete-many') {
+      const ids = body?.sessionIds ?? []
+      // Like the host: what went to the bin is in the bin on the next read,
+      // which is the read the tab badge makes.
+      recycled = [...recycled, ...ids.map(sessionId => ({ sessionId, title: sessionId, cwd: '', at: 0, label: sessionId }))]
       return respond({
         ok: true,
-        deleted: (body?.sessionIds ?? []).map((sessionId) => ({ sessionId, recycled: true, permanent: false })),
+        deleted: ids.map((sessionId) => ({ sessionId, recycled: true, permanent: false })),
         failed: [],
         emptiedWorkspaces,
         removedWorkspaces,
@@ -638,10 +642,49 @@ await check('页面顶部是标签条：两个列表 + 配置按钮', async () =
   assert.equal(sessions.props['aria-selected'], true, '默认停在会话列表')
   assert.equal(recycle.props['aria-selected'], false)
   assert.ok(buttonByText(tree, '配置'), '配置按钮应当在标签条上')
-  // Before the bin has ever been opened its count is unknown, so no badge —
-  // the pane is not mounted until the tab is clicked, and the count comes with
-  // it. The bin's second tab carries no number rather than a made-up zero.
-  assert.equal(textOf(recycle), '回收站', `未打开时不该报数：${textOf(recycle)}`)
+  // The bin's count is on the ticket before anyone has crossed over. The pane is
+  // not mounted yet, so the strip reads the number itself — a badge that only
+  // appears once you have clicked is no use as the reason to click.
+  assert.equal(textOf(recycle), '回收站1', `还没点就该有数：${textOf(recycle)}`)
+})
+
+await check('回收站条数：开页就报，来回切也不重读', async () => {
+  const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED })
+  const panel = panelOf(client)
+  let tree = await tabTree(client)
+  assert.equal(paneOf(tree, 'recycle'), undefined, '没点过，回收站面板仍未挂载')
+  assert.equal(countCalls(client, '/__session-recycle/recycled'), 1, '开页读一次，不必挂载面板')
+
+  tabButton(tree, 'recycle').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(textOf(tabButton(tree, 'recycle')), '回收站1', '面板自己读一次，数不变')
+
+  // Counting is not a reason to re-read: flicking across and back must not
+  // fetch the bin again.
+  const after = countCalls(client, '/__session-recycle/recycled')
+  tabButton(tree, 'sessions').props.onClick()
+  tree = await client.runtime.settle(panel)
+  tabButton(tree, 'recycle').props.onClick()
+  tree = await client.runtime.settle(panel)
+  assert.equal(countCalls(client, '/__session-recycle/recycled'), after, '来回切不该重读回收站')
+})
+
+await check('删掉的会话进了回收站，标签条数跟着涨', async () => {
+  const client = makeClient({ sessions: SESSIONS, recycled: [] })
+  const panel = panelOf(client)
+  let tree = await tabTree(client)
+  assert.equal(textOf(tabButton(tree, 'recycle')), '回收站0', '空回收站报 0，不藏起来')
+
+  for (const box of boxes(tree)) box.props.onChange()
+  tree = await client.runtime.settle(panel)
+  // Toolbar button raises the bar; the bar's own button is the one that acts.
+  buttonByText(tree, '删除所选').props.onClick()
+  tree = await client.runtime.settle(panel)
+  confirmDeleteButton(tree).props.onClick()
+  tree = await client.runtime.settle(panel)
+
+  assert.equal(textOf(tabButton(tree, 'recycle')), '回收站2',
+    `批次进了回收站，条数要跟上：${textOf(tabButton(tree, 'recycle'))}`)
 })
 
 await check('点回收站标签切到回收站列表，会话列表留在树上但被隐藏', async () => {
@@ -686,7 +729,9 @@ await check('切回会话列表：勾选还在，列表也不再重拉一次', a
   assert.equal(boxes(paneOf(tree, 'sessions')).filter(box => box.props.checked).length, 1, '勾选应当保留')
   assert.ok(textOf(paneOf(tree, 'sessions')).includes('已选 1 条'))
   assert.equal(countCalls(client, '/__session-recycle/list'), listCalls, '标签来回切不该重拉会话列表')
-  assert.equal(countCalls(client, '/__session-recycle/recycled'), 1, '回收站也只拉一次')
+  // One read for the badge at page open, one for the pane's own list: what must
+  // not grow is the count per crossing.
+  assert.equal(countCalls(client, '/__session-recycle/recycled'), 2, '回收站只读两次，与来回切无关')
 })
 
 await check('tabs 之外的设置项都收进右上角「配置」按钮', async () => {
