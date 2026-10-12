@@ -43,64 +43,74 @@ DSH 官方只有「归档」，没有删除。社区插件有，但都是**永�
 作用：给 DeepSeek Harness 加会话删除（官方只有归档，没有删除），
       删掉的会话进回收站，可以随时还原。
 
-先分清是「首次安装」还是「更新」：<profile>/vendor/dsh-session-recycle
-已经存在就是更新，不要重新 clone。
+总原则：除了「装到哪个 profile」需要我回答，其余一律自己判断执行，
+不要停下来等回复。每步走了哪个分支、命令输出是什么，写进最后的报告。
 
-按以下步骤操作，每步做完报告结果，任何一步失败就停下来问我：
+1. 找到 DSH profile 目录。默认 C:\Users\<用户名>\.dsh\profiles\desktop（Windows）
+   或 ~/.dsh/profiles/desktop（macOS/Linux）。Windows 下 Node 的 process.env.HOME
+   是空的，别拿 HOME 拼路径。若多个 profile 都带 vendor/ 再问我装哪个；
+   否则自己选 desktop 并在报告里说明。
 
-1. 找到我的 DSH profile 目录。默认 ~/.dsh/profiles/desktop/
-   （Windows 是 C:\Users\<用户名>\.dsh\profiles\desktop；
-    Windows 下 Node 的 process.env.HOME 是空的，别拿 HOME 拼路径）
-   如果有多个 profile，先问我装到哪个。
+2. 取源码。看 <profile>/vendor/dsh-session-recycle 的实际情况走对应分支，不要问：
+   a) 目录不存在
+      git clone https://github.com/yuchuan000/dsh-session-recycle.git <profile>/vendor/dsh-session-recycle
+   b) 存在且有 .git
+      git -C <dir> status --short      # 有改动也继续，把改动文件记进报告
+      git -C <dir> pull --ff-only      # 拉不动就 fetch + git -C <dir> reset --hard origin/main
+   c) 存在但**没有 .git**（zip 解压 / 别的机器同步过来 / 卸载后残留，都很常见）
+      就地把它接管成 git 仓库并对齐远端 —— 不要删目录，也不要 clone 到非空目录
+      （那会报 destination path already exists，不是「已经装好了」）：
+        cd <dir>
+        git init -q
+        git remote remove origin 2>/dev/null
+        git remote add origin https://github.com/yuchuan000/dsh-session-recycle.git
+        git fetch --depth 1 origin main
+        git checkout -f -B main FETCH_HEAD
+      同名文件会被远端覆盖（这正是「装最新版」），本地独有文件保留。
+   d) 版本校验（必做）
+      git -C <dir> log -1 --format='%h %s'
+      git ls-remote https://github.com/yuchuan000/dsh-session-recycle.git HEAD
+      两者 commit 前 7 位必须一致；不一致就回到本步重做，最多两次。
+      两次仍不一致，把两条命令的完整输出贴进报告，然后继续往下走。
 
-2. 取源码（只走其中一条）
-   首次安装：
-     git clone https://github.com/yuchuan000/dsh-session-recycle.git <profile>/vendor/dsh-session-recycle
-   更新（目录已存在）：
-     cd <profile>/vendor/dsh-session-recycle
-     git status --short     # 有本地改动先报告给我，不要覆盖
-     git pull --ff-only     # 拉不动（有分叉）就停下来问我
-   ⚠️ clone 到已存在的目录会报 "destination path already exists"，
-   那**不是**「已经装好了」，必须走更新这条。
+3. 在 <profile>/package.json 里**确保**两处存在（没有就加，有了别重复加）：
+   a) npm pkg set dependencies.dsh-session-recycle=file:./vendor/dsh-session-recycle
+   b) dsh.profile.bundles 数组里有 "dsh-session-recycle"：
+      先读数组长度与内容，已存在就跳过，不存在就
+      npm pkg set 'dsh.profile.bundles[<长度>]=dsh-session-recycle'（索引别照抄）
+   卸载重装的场景里这两处通常已经没了，一律补上。
 
-3. 在 <profile>/package.json 里确认两处（已有就跳过，别重复加）
-   a) dependencies: "dsh-session-recycle": "file:./vendor/dsh-session-recycle"
-   b) dsh.profile.bundles 数组里有 "dsh-session-recycle"
-      索引不要照抄：先读数组长度，追加到末尾。
+4. 在 <profile> 目录里跑 pnpm install（有 pnpm-lock.yaml 或 node_modules/.modules.yaml
+   就是 pnpm；判断不了就先试 pnpm install，失败再试 npm install）。
+   失败就把完整错误贴进报告，然后继续第 5 步用手动链接兜底。
 
-4. 重新链接依赖（在 <profile> 目录里）
-   pnpm install           # 本机用 pnpm；不是 pnpm 就先问清楚，别猜
+5. 【关键】同步进 node_modules —— 不做这一步就是旧版本。
+   目标：<profile>/node_modules/dsh-session-recycle/src/client.js 与 vendor 那份 sha256 一致。
+   - 不存在 → 手动建（在 <profile> 目录下）：
+       Windows:      mklink /J node_modules\dsh-session-recycle vendor\dsh-session-recycle
+       macOS/Linux:  ln -sfn ../vendor/dsh-session-recycle node_modules/dsh-session-recycle
+     建完再校验
+   - 存在且是 pnpm 建的**硬链接副本**（真实目录、与 vendor 文件 inode 相同）→
+     git 更新 vendor 会换新 inode、链接断开，必须覆盖同步（不要先删再建）：
+       macOS/Linux: cp -f vendor/dsh-session-recycle/src/*.js node_modules/dsh-session-recycle/src/
+       Windows:     copy /Y vendor\dsh-session-recycle\src\*.js node_modules\dsh-session-recycle\src\
+     package.json 若变了也一起覆盖
+   - 存在且是 `->` 链接 → 第 2 步之后已是新的，只做校验
+   - 覆盖报「文件被占用」→ 先结束 DSH 进程再重试一次
+   - 最后再比一次 sha256；不一致最多再试两轮
 
-5. 【关键】把新代码同步进 node_modules —— 不做这一步就是旧版本
-   node_modules/dsh-session-recycle 里那份很可能是 pnpm 建的**硬链接副本**：
-   git 更新 vendor 时会换成新文件（新 inode），硬链接随即断开，
-   于是 vendor 是新的、node_modules 还是旧的，而 DSH 加载的正是后者。
-   核对并修复：
-     - 比较 <profile>/vendor/dsh-session-recycle/src/client.js 与
-       <profile>/node_modules/dsh-session-recycle/src/client.js 的 sha256
-     - 不一致就用**覆盖**的方式同步（不要先删再建）：
-         macOS/Linux： cp -f vendor/dsh-session-recycle/src/*.js node_modules/dsh-session-recycle/src/
-         Windows：    copy /Y vendor\dsh-session-recycle\src\*.js node_modules\dsh-session-recycle\src\
-       src/ 下逐个覆盖；package.json 若变了也一起覆盖
-     - 再比一次 hash，必须完全一致
+6. 报告里写清楚：vendor 的 commit（第 2 步 d）、两份 client.js 的 sha256、
+   node_modules 那份是链接还是硬链接副本、package.json 两处现在的值。
+   并提醒我：**必须完全退出 DSH 再启动**才生效（托盘也退掉），只刷新页面不够。
 
-6. 版本核对，把结果报给我
-     git -C <profile>/vendor/dsh-session-recycle log -1 --format='%h %s'
-     git ls-remote https://github.com/yuchuan000/dsh-session-recycle.git HEAD
-   两个 commit 的前 7 位必须一致；不一致说明没拉到最新，回到第 2 步。
-   同时把第 5 步的两个 sha256 报给我。
-
-7. 告诉我装好了，并提醒我：**必须完全退出 DSH 再启动**才生效
-   （只刷新浏览器页面不够 —— 客户端插件在启动时打包；托盘里也要退掉）。
-
-8. 我重启后会看一眼：设置 → 左侧导航出现「会话删除」，图标是**垃圾桶**
-   （不是齿轮），正文第一行是「帮助 ?」。如果图标还是齿轮、或页面里还有
-   大段解释文字，说明旧代码还在生效，回到第 5 步重做同步。
+7. 提醒我验收：设置 → 左侧导航出现「会话删除」，图标是**垃圾桶**（不是齿轮），
+   正文第一行是「帮助 ?」。若图标还是齿轮、或页面里还有大段解释文字，就是旧代码
+   仍在生效 —— 你把第 5 步重做一遍并让我重启，不要问我该怎么办。
 
 注意：
 - 不要修改我的其他依赖或配置
-- 不要删我的 vendor 目录、不要用重新 clone 去覆盖它
-- 如果安装过程中报错，把完整错误贴给我，不要自己猜测性修改
+- 不要删 vendor 目录、不要用 clone 覆盖非空目录（走 2c）
+- 不要停下来问我；只有 profile 选择需要我回答
 ```
 
 装好后，侧栏会话行的 `...` 菜单里会出现「删除会话」，  
@@ -123,6 +133,19 @@ git clone https://github.com/yuchuan000/dsh-session-recycle.git vendor/dsh-sessi
 cd ~/.dsh/profiles/<profile>/vendor/dsh-session-recycle
 git status --short          # 有改动先自己处理
 git pull --ff-only
+```
+
+目录存在但**不是 git 仓库**（没有 `.git` —— zip 解压、别的机器同步过来、
+或卸载后残留都会这样）：就地接管，别删目录、也别 clone 到非空目录。
+
+```sh
+cd ~/.dsh/profiles/<profile>/vendor/dsh-session-recycle
+git init -q
+git remote remove origin 2>/dev/null
+git remote add origin https://github.com/yuchuan000/dsh-session-recycle.git
+git fetch --depth 1 origin main
+git checkout -f -B main FETCH_HEAD      # 同名文件对齐远端，本地独有文件保留
+git log -1 --format='%h %s'
 ```
 
 然后在 `<profile>/package.json` 里确认两处：
@@ -154,6 +177,7 @@ git pull --ff-only
 | **`git clone` 到已存在的目录** | 报 `destination path already exists` 就失败了。若把这条当成「已经装好了」，vendor 里那份始终没动过 |
 | **提示词让 AI「已有就别重复加」** | 它看见 `package.json` 里已经有这个依赖，就停手报告「你装过了」—— 配置和代码是两件事，代码没更新 |
 | **`node_modules` 里是硬链接副本** | pnpm 装 `file:` 依赖时把 vendor 的文件**硬链接**进来（`stat -c %i` 看两边 inode 相同）。git 更新 vendor 会写出**新 inode**，链接断开，于是 vendor 是新版、**DSH 实际加载的还是旧文件**。必须覆盖同步 |
+| **vendor 目录不是 git 仓库** | `git pull` 报 `not a git repository`。这个目录可能来自 zip 解压、别的机器同步、或卸载后残留 —— 而卸载通常只撤掉 `package.json` 里的两处，**vendor 会留下来**。这时要么就地 `git init` 接管（推荐），要么换成一个干净的 clone，别直接 clone 到非空目录 |
 
 判断到底装了哪一版，看两处就够：
 
