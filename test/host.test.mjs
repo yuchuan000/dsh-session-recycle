@@ -204,39 +204,55 @@ function makeCtx(root) {
   check('默认设置', () => {
     assert.deepEqual({ ...mod.DEFAULT_SETTINGS }, {
       confirmSingleDelete: true,
-      emptyWorkspaceAction: 'ask',
+      autoPruneEmpty: false,
       useRecycleBin: true,
     })
   })
-  check('空工作区策略只有三个取值', () => {
-    assert.deepEqual([...mod.EMPTY_WORKSPACE_ACTIONS], ['ask', 'auto', 'keep'])
+  check('默认不清理空分组/空目录', () => {
+    // Off unless the user asks: an emptied group is a project they may still
+    // work in, and the default must not remove it for them.
+    assert.equal(mod.DEFAULT_SETTINGS.autoPruneEmpty, false)
   })
 
   const { routes } = mountRoutes(root)
   const write = (body) => callRoute(routes, '/__session-recycle/settings', makeRequest('POST', body))
   const read = async () => (await callRoute(routes, '/__session-recycle/settings', makeRequest('GET'))).json().settings
 
-  await write({ emptyWorkspaceAction: 'auto' })
-  const autoSettings = await read()
-  check('emptyWorkspaceAction 可写入并读回', () => assert.equal(autoSettings.emptyWorkspaceAction, 'auto'))
+  await write({ autoPruneEmpty: true })
+  const on = await read()
+  check('autoPruneEmpty 可写入并读回', () => assert.equal(on.autoPruneEmpty, true))
 
-  await write({ emptyWorkspaceAction: 'nonsense' })
-  const keptAfterJunk = await read()
-  check('非法策略被忽略，保留原值', () => assert.equal(keptAfterJunk.emptyWorkspaceAction, 'auto'))
+  await write({ autoPruneEmpty: 'nonsense' })
+  const afterJunk = await read()
+  check('非布尔值被忽略，保留原值', () => assert.equal(afterJunk.autoPruneEmpty, true))
 
-  // The old boolean, both ways round: true meant "ask", false meant "do not
-  // ask" — which is `keep`, never `auto`.
+  // The three-way string, one value at a time. Only `auto` ever asked for a
+  // silent sweep; `ask` and `keep` both leave the group alone now that the
+  // prompt is gone.
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ emptyWorkspaceAction: 'auto' }))
+  check('旧三态 auto 迁移成勾选', async () => {})
+  assert.equal((await read()).autoPruneEmpty, true)
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ emptyWorkspaceAction: 'ask' }))
+  check('旧三态 ask 迁移成不勾选', async () => {})
+  assert.equal((await read()).autoPruneEmpty, false)
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ emptyWorkspaceAction: 'keep' }))
+  assert.equal((await read()).autoPruneEmpty, false)
+
+  // The oldest spelling: a switch about being *asked*. Neither answer asked for
+  // a removal, so both land on off.
   writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ askRemoveEmptyWorkspace: false }))
-  const legacyFalse = await read()
-  check('旧布尔 false 迁移成 keep', () => assert.equal(legacyFalse.emptyWorkspaceAction, 'keep'))
-
+  check('旧布尔 false 迁移成不勾选', async () => {})
+  assert.equal((await read()).autoPruneEmpty, false)
   writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ askRemoveEmptyWorkspace: true }))
-  const legacyTrue = await read()
-  check('旧布尔 true 迁移成 ask', () => assert.equal(legacyTrue.emptyWorkspaceAction, 'ask'))
+  check('旧布尔 true 也迁移成不勾选', async () => {})
+  assert.equal((await read()).autoPruneEmpty, false)
 
-  await write({ askRemoveEmptyWorkspace: false })
-  const legacyWrite = await read()
-  check('旧布尔键仍可写入（缓存中的旧客户端）', () => assert.equal(legacyWrite.emptyWorkspaceAction, 'keep'))
+  await write({ emptyWorkspaceAction: 'auto' })
+  check('旧三态键仍可写入（缓存中的旧客户端）', async () => {})
+  assert.equal((await read()).autoPruneEmpty, true)
+  await write({ askRemoveEmptyWorkspace: true })
+  check('旧布尔键仍可写入（缓存中的旧客户端）', async () => {})
+  assert.equal((await read()).autoPruneEmpty, false)
 
   rmSync(root, { recursive: true, force: true })
 }
@@ -491,21 +507,21 @@ async function callRoute(routes, path, request) {
   rmSync(root, { recursive: true, force: true })
 }
 
-// --- 5f. the empty-workspace policy decides what a delete does afterwards ---
+// --- 5f. the empty-sweep switch decides what a delete does afterwards ---
 //
-// Three policies, one scenario: delete the only session of a workspace and see
-// who cleans up. `ask` must hand the list to the client and touch nothing,
-// `auto` must remove it (and its now-empty folder) without asking, `keep` must
-// leave both alone.
-for (const [policy, expectDialog, expectRemoved] of [['ask', true, false], ['auto', false, true], ['keep', false, false]]) {
-  const root = mkdtempSync(join(tmpdir(), `sr-test5f-${policy}-`))
+// One scenario, two answers: delete the only session of a workspace and see who
+// cleans up. With `autoPruneEmpty` on, the host removes the group and its
+// now-empty folder; with it off — the default — both survive and the client is
+// merely told what went empty.
+for (const [auto, expectRemoved] of [[true, true], [false, false]]) {
+  const root = mkdtempSync(join(tmpdir(), `sr-test5f-${auto}-`))
   process.env.DSH_HOME = root
   const sessionsRoot = join(root, 'sessions')
   const cwd = 'd:/work/policy'
   const slug = mod.sessionFolderName(cwd)
   const sid = 'session-eeee1111-2222-3333-4444-555555555551'
   makeSession(sessionsRoot, slug, sid, cwd)
-  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ emptyWorkspaceAction: policy }))
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ autoPruneEmpty: auto }))
 
   const { routes, ctx } = mountRoutes(root)
   ctx.registry.enabled = true
@@ -514,19 +530,46 @@ for (const [policy, expectDialog, expectRemoved] of [['ask', true, false], ['aut
   const res = await callRoute(routes, '/__session-recycle/delete-many', makeRequest('POST', { sessionIds: [sid] }))
   const payload = res.json()
 
-  check(`策略 ${policy}：${
-    expectDialog ? '交给客户端询问' : expectRemoved ? '直接移除' : '原样保留'
-  }`, () => {
+  check(`autoPruneEmpty=${auto}：${expectRemoved ? '连分组一起清掉' : '只报告、不动分组'}`, () => {
     assert.equal(res.status, 200)
-    assert.equal(payload.emptiedWorkspaceAction, policy)
-    assert.equal(payload.emptiedWorkspaces.length, expectDialog ? 1 : 0)
+    assert.equal(payload.autoPruneEmpty, auto)
+    // Always reported: what the batch emptied is information either way.
+    assert.equal(payload.emptiedWorkspaces.length, 1)
     assert.equal(payload.removedWorkspaces.length, expectRemoved ? 1 : 0)
     assert.equal(ctx.workspaces.has('ws-policy'), !expectRemoved)
   })
 
-  check(`策略 ${policy}：磁盘空目录${expectRemoved ? '被清掉' : '保留'}`, () => {
+  check(`autoPruneEmpty=${auto}：磁盘空目录${expectRemoved ? '被清掉' : '保留'}`, () => {
     assert.equal(existsSync(join(sessionsRoot, slug)), !expectRemoved)
   })
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5f2. the single delete answers the same way ---
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5f2-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const cwd = 'd:/work/single'
+  const slug = mod.sessionFolderName(cwd)
+  const sid = 'session-eeee1111-2222-3333-4444-555555555552'
+  makeSession(sessionsRoot, slug, sid, cwd)
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ autoPruneEmpty: true }))
+
+  const { routes, ctx } = mountRoutes(root)
+  ctx.registry.enabled = true
+  ctx.workspaces.set('ws-single', { id: 'ws-single', title: 'single', path: cwd, sessionIds: [sid] })
+
+  const res = await callRoute(routes, '/__session-recycle/delete', makeRequest('POST', { sessionId: sid }))
+  const payload = res.json()
+  check('/delete 在开关打开时移除空分组', () => {
+    assert.equal(res.status, 200)
+    assert.equal(payload.autoPruneEmpty, true)
+    assert.equal(payload.removedWorkspaces.length, 1)
+    assert.equal(payload.emptiedWorkspaces.length, 1)
+    assert.equal(ctx.workspaces.has('ws-single'), false)
+  })
+  check('/delete 顺带清掉磁盘空目录', () => assert.equal(existsSync(join(sessionsRoot, slug)), false))
   rmSync(root, { recursive: true, force: true })
 }
 
@@ -541,15 +584,35 @@ for (const [policy, expectDialog, expectRemoved] of [['ask', true, false], ['aut
   const busySlug = mod.sessionFolderName('d:/work/busy')
   mkdirSync(join(sessionsRoot, emptySlug), { recursive: true })
   makeSession(sessionsRoot, busySlug, 'session-ffff1111-2222-3333-4444-555555555551', 'd:/work/busy')
+  // A group the user emptied (no sessions left) and one still in use.
+  const liveSlug = mod.sessionFolderName('d:/work/live')
+  mkdirSync(join(sessionsRoot, liveSlug), { recursive: true })
 
-  const { routes } = mountRoutes(root)
+  const { routes, ctx } = mountRoutes(root)
+  ctx.registry.enabled = true
+  ctx.workspaces.set('ws-dead', { id: 'ws-dead', title: 'dead', path: 'd:/work/empty', sessionIds: [] })
+  ctx.workspaces.set('ws-live', {
+    id: 'ws-live', title: 'live', path: 'd:/work/live',
+    sessionIds: ['session-ffff1111-2222-3333-4444-555555555551'],
+  })
+
   check('/empty-dirs 已注册', () => assert.ok(routes.has('/__session-recycle/empty-dirs')))
 
   const listed = await callRoute(routes, '/__session-recycle/empty-dirs', makeRequest('GET'))
   check('/empty-dirs 只报空目录', () => {
     assert.equal(listed.status, 200)
-    assert.deepEqual(listed.json().dirs, [emptySlug])
-    assert.equal(listed.json().count, 1)
+    // Sorted, and `live` is not in it: it holds nothing either, but a folder
+    // that is empty is a folder that is empty — the two are separate counts.
+    assert.deepEqual(listed.json().dirs, [emptySlug, liveSlug].sort())
+    assert.equal(listed.json().count, 2)
+  })
+
+  check('/empty-dirs 只报没有会话的分组', () => {
+    const groups = listed.json().workspaces
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].workspaceId, 'ws-dead')
+    assert.equal(groups[0].title, 'dead')
+    assert.equal(listed.json().workspaceCount, 1)
   })
 
   const notGet = await callRoute(routes, '/__session-recycle/empty-dirs', makeRequest('POST', {}))
@@ -564,15 +627,36 @@ for (const [policy, expectDialog, expectRemoved] of [['ask', true, false], ['aut
   const pruned = await callRoute(routes, '/__session-recycle/prune-empty', makeRequest('POST', {}))
   check('/prune-empty 删掉空目录', () => {
     assert.equal(pruned.status, 200)
-    assert.deepEqual(pruned.json().removed, [emptySlug])
+    assert.deepEqual(pruned.json().removed, [emptySlug, liveSlug].sort())
+  })
+  check('/prune-empty 移除没有会话的分组', () => {
+    assert.equal(pruned.json().removedWorkspaces.length, 1)
+    assert.equal(pruned.json().workspaceCount, 1)
+    assert.equal(pruned.json().failed.length, 0)
+    assert.equal(ctx.workspaces.has('ws-dead'), false)
+    assert.equal(ctx.workspaces.has('ws-live'), true)
   })
   check('/prune-empty 不碰非空目录', () => {
     assert.equal(existsSync(join(sessionsRoot, emptySlug)), false)
     assert.equal(existsSync(join(sessionsRoot, busySlug, 'session-ffff1111-2222-3333-4444-555555555551')), true)
   })
+  check('/prune-empty 连带清掉分组自己留下的空目录', () => {
+    // `ws-live`'s folder went with the folder sweep; the point is that removing
+    // a group twice over (folder pass + group pass) is idempotent, not an error.
+    assert.equal(existsSync(join(sessionsRoot, liveSlug)), false)
+  })
 
   const again = await callRoute(routes, '/__session-recycle/empty-dirs', makeRequest('GET'))
-  check('/empty-dirs 清理后归零', () => assert.equal(again.json().count, 0))
+  check('/empty-dirs 清理后归零', () => {
+    assert.equal(again.json().count, 0)
+    assert.equal(again.json().workspaceCount, 0)
+  })
+
+  const second = await callRoute(routes, '/__session-recycle/prune-empty', makeRequest('POST', {}))
+  check('/prune-empty 再按一次什么都不做', () => {
+    assert.deepEqual(second.json().removed, [])
+    assert.deepEqual(second.json().removedWorkspaces, [])
+  })
 
   rmSync(root, { recursive: true, force: true })
 }

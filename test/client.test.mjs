@@ -226,6 +226,23 @@ const boxes = (tree) => {
   if (!box) return []
   return nodes(box, (node) => node.tag === 'input' && node.props.type === 'checkbox')
 }
+/**
+ * The checkbox of the preference row whose text contains `label`.
+ *
+ * The settings page carries one checkbox per preference, all of them outside
+ * the pick-list, so `boxes` cannot find them; matching on the row's own copy is
+ * the only way to name the right one.
+ */
+const prefBox = (tree, label) => {
+  const row = nodes(tree, (node) => node.tag === 'label' && textOf(node).includes(label))[0]
+  return row && nodes(row, (node) => node.tag === 'input' && node.props.type === 'checkbox')[0]
+}
+/** The text of whatever banner the overlay currently holds. */
+const toastText = async (client) => {
+  const host = client.slots.find((entry) => entry.options.id === 'session-recycle-toast')
+  if (!host) return ''
+  return textOf(await client.runtime.render(host.component))
+}
 
 // --- the plugin context ------------------------------------------------------
 
@@ -240,11 +257,15 @@ function makeClient({
   shell,
   uiSession,
   uiWorkspace,
-  // Empty session folders the host reports, and what a sweep removes from them.
+  // Empty session folders and empty workspace groups the host reports, and what
+  // a sweep removes from them.
   emptyDirs = [],
+  emptyGroups = [],
   prunedDirs = null,
-  // What the host answers a batch delete with. `emptiedWorkspaces` is the
-  // `ask` policy's payload; `removedWorkspaces` is the `auto` policy's.
+  prunedGroups = null,
+  // What the host answers a batch delete with. `emptiedWorkspaces` is what the
+  // batch left empty; `removedWorkspaces` is the subset the `autoPruneEmpty`
+  // switch then removed.
   emptiedWorkspaces = [],
   removedWorkspaces = [],
   workspaceRemovalFailed = [],
@@ -253,7 +274,9 @@ function makeClient({
   const primitives = {
     IconTrashOutline16: function IconTrashOutline16() { return null },
     Modal: function Modal(props) { return props.children ?? null },
-    Toast: function Toast() { return null },
+    // Renders the banner's text so a test can read what was announced; the real
+    // primitive draws a floating card around the same string.
+    Toast: function Toast(props) { return props.text ?? null },
   }
   const moduleExports = registration.factory((id) => {
     if (id === 'react') return runtime.React
@@ -311,12 +334,27 @@ function makeClient({
     if (path === '/__session-recycle/list') return respond({ ok: true, sessions })
     if (path === '/__session-recycle/recycled') return respond({ ok: true, entries: recycled })
     if (path === '/__session-recycle/empty-dirs') {
-      return respond({ ok: true, dirs: emptyDirs, count: emptyDirs.length })
+      return respond({
+        ok: true,
+        dirs: emptyDirs,
+        count: emptyDirs.length,
+        workspaces: emptyGroups,
+        workspaceCount: emptyGroups.length,
+      })
     }
     if (path === '/__session-recycle/prune-empty') {
       const removed = prunedDirs ?? emptyDirs
+      const removedGroups = prunedGroups ?? emptyGroups
       emptyDirs = []
-      return respond({ ok: true, removed, count: removed.length })
+      emptyGroups = []
+      return respond({
+        ok: true,
+        removed,
+        count: removed.length,
+        removedWorkspaces: removedGroups,
+        workspaceCount: removedGroups.length,
+        failed: [],
+      })
     }
     if (path === '/__session-recycle/delete-many') {
       return respond({
@@ -367,13 +405,13 @@ await check('注册两个设置分区：会话列表 + 回收站', () => {
   assert.equal(main.options.name, 'settings.section')
 })
 
-await check('注册会话头部按钮、删除弹窗、空工作区弹窗与 toast', () => {
+await check('注册会话头部按钮、删除弹窗与 toast（空工作区询问已并入设置页）', () => {
   const client = makeClient()
   const ids = client.slots.map((entry) => entry.options.id)
   assert.ok(ids.includes('session-recycle-header'))
   assert.ok(ids.includes('session-recycle-dialog'))
-  assert.ok(ids.includes('session-recycle-empty-workspace'))
   assert.ok(ids.includes('session-recycle-toast'))
+  assert.ok(!ids.includes('session-recycle-empty-workspace'), '询问弹窗应当随三态策略一起删掉')
 })
 
 // --- 2. dictionaries ---------------------------------------------------------
@@ -643,39 +681,45 @@ await check('批量删除时，清空的是当前打开的那个会话而不是�
   assert.equal(cleared[0], 'session-3', '要清的是当前打开的那个，不是列表第一条')
 })
 
-// --- 6b. the empty-workspace policy -----------------------------------------
+// --- 6b. the empty-sweep switch ----------------------------------------------
 
-await check('删空策略是三选一，点选写回 host', async () => {
+await check('「删除后自动清理」是一个复选框，勾上写回 host', async () => {
   const client = makeClient({})
   const panel = sectionById(client, 'session-recycle-settings').component
   let tree = await client.runtime.render(panel)
 
-  const group = nodes(tree, (node) => node.props?.role === 'radiogroup')[0]
-  assert.ok(group, `应当渲染三选一，实际按钮：${reachable(tree)}`)
-  const options = nodes(group, (node) => node.tag === 'button')
-  assert.deepEqual(options.map(textOf), ['询问我', '自动移除', '保留'], '三个取值缺一不可')
-  assert.equal(options[0].props['aria-checked'], true, '默认是「询问我」')
+  const box = prefBox(tree, '删除后自动清理空分组与空目录')
+  assert.ok(box, `设置页应当有这一行：${textOf(tree).slice(0, 300)}`)
+  assert.equal(box.props.checked, false, '默认不勾选：不替用户删分组')
 
-  buttonExact(tree, '自动移除').props.onClick()
+  box.props.onChange({ target: { checked: true } })
   tree = await client.runtime.settle(panel)
   const posted = client.calls.filter(call => call.path === '/__session-recycle/settings' && call.method === 'POST')
-  assert.deepEqual(posted.map(call => call.body), [{ emptyWorkspaceAction: 'auto' }])
-  assert.equal(buttonExact(tree, '自动移除').props['aria-checked'], true, '保存后选中态应当跟着走')
+  assert.deepEqual(posted.map(call => call.body), [{ autoPruneEmpty: true }])
+  assert.equal(prefBox(tree, '删除后自动清理空分组与空目录').props.checked, true, '保存后勾选态应当跟着走')
 })
 
-await check('未知的删空策略回落到默认值而不是空选中', async () => {
-  const client = makeClient({ settings: { emptyWorkspaceAction: 'wat' } })
+await check('host 说勾选时面板也勾上', async () => {
+  const client = makeClient({ settings: { autoPruneEmpty: true } })
   const panel = sectionById(client, 'session-recycle-settings').component
   const tree = await client.runtime.render(panel)
-  const options = nodes(nodes(tree, (node) => node.props?.role === 'radiogroup')[0], (node) => node.tag === 'button')
-  assert.equal(options[0].props['aria-checked'], true)
+  assert.equal(prefBox(tree, '删除后自动清理').props.checked, true)
 })
 
-await check('策略为自动移除时，删除后不再弹空工作区询问', async () => {
+await check('host 只返回旧字段时视为不勾选', async () => {
+  // An older host never removed a group silently unless told to, so an unknown
+  // shape must read as "off" rather than as a licence to delete.
+  const client = makeClient({ settings: { emptyWorkspaceAction: 'ask' } })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  assert.equal(prefBox(tree, '删除后自动清理').props.checked, false)
+})
+
+await check('开关打开时，删完只报数、不再弹空工作区询问', async () => {
   drainEvents('dsh-session-recycle:empty-workspace')
   const client = makeClient({
     sessions: SESSIONS,
-    settings: { emptyWorkspaceAction: 'auto' },
+    settings: { autoPruneEmpty: true },
     removedWorkspaces: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj', prunedDirs: [] }],
   })
   const panel = sectionById(client, 'session-recycle-settings').component
@@ -686,16 +730,18 @@ await check('策略为自动移除时，删除后不再弹空工作区询问', a
   tree = await client.runtime.settle(panel)
   await confirmDeleteButton(tree).props.onClick()
   tree = await client.runtime.settle(panel)
-  // The offer is deferred by a tick, so give it one before asserting its absence.
+  // The old prompt was deferred by a tick, so give one before asserting absence.
   await new Promise((resolve) => setTimeout(resolve, 5))
-  assert.deepEqual(drainEvents('dsh-session-recycle:empty-workspace'), [], '自动移除时不该再问')
+  assert.deepEqual(drainEvents('dsh-session-recycle:empty-workspace'), [], '不该再弹询问')
+  const banner = await toastText(client)
+  assert.ok(banner.includes('已删除 2 个会话'), `应当报出删了几条：${banner}`)
+  assert.ok(banner.includes('并移除 1 个空分组'), `同一条横幅里报出分组数：${banner}`)
 })
 
-await check('策略为询问时，删空仍然弹一次询问', async () => {
-  drainEvents('dsh-session-recycle:empty-workspace')
+await check('开关关闭时，删除不触碰任何分组', async () => {
   const client = makeClient({
     sessions: SESSIONS,
-    settings: { emptyWorkspaceAction: 'ask' },
+    settings: { autoPruneEmpty: false },
     emptiedWorkspaces: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj' }],
   })
   const panel = sectionById(client, 'session-recycle-settings').component
@@ -707,15 +753,15 @@ await check('策略为询问时，删空仍然弹一次询问', async () => {
   await confirmDeleteButton(tree).props.onClick()
   tree = await client.runtime.settle(panel)
   await new Promise((resolve) => setTimeout(resolve, 5))
-  const events = drainEvents('dsh-session-recycle:empty-workspace')
-  assert.equal(events.length, 1, '询问策略下应当弹一次')
-  assert.equal(events[0].detail.workspaces[0].workspaceId, 'ws-1')
+  assert.deepEqual(drainEvents('dsh-session-recycle:empty-workspace'), [], '不该弹询问')
+  const banner = await toastText(client)
+  assert.ok(!banner.includes('空分组'), `没有移除分组就不该提分组：${banner}`)
 })
 
 await check('工作区移除失败时，提示不会被会话失败的文案顶掉', async () => {
   const client = makeClient({
     sessions: SESSIONS,
-    settings: { emptyWorkspaceAction: 'auto' },
+    settings: { autoPruneEmpty: true },
     workspaceRemovalFailed: [{ workspaceId: 'ws-1', error: 'no such workspace', code: 'NOT_FOUND' }],
   })
   const original = globalThis.fetch
@@ -750,14 +796,20 @@ await check('工作区移除失败时，提示不会被会话失败的文案顶�
   assert.ok(text.includes('1 个空工作区移除失败'), `工作区失败原因应当保留：${text.slice(-300)}`)
 })
 
-// --- 6c. empty session folders on disk ---------------------------------------
+// --- 6c. empty groups and empty folders --------------------------------------
 
-await check('空目录行显示数量并可一键清理', async () => {
-  const client = makeClient({ emptyDirs: ['--d-a--', '--d-b--'] })
+await check('空分组与空目录行显示数量并可一键清理', async () => {
+  const client = makeClient({
+    emptyDirs: ['--d-a--', '--d-b--'],
+    emptyGroups: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj' }],
+  })
   const panel = sectionById(client, 'session-recycle-settings').component
   let tree = await client.runtime.render(panel)
 
-  assert.ok(textOf(tree).includes('当前有 2 个空目录'), `应当显示数量：${textOf(tree).slice(0, 240)}`)
+  assert.ok(
+    textOf(tree).includes('当前有 2 个空目录、1 个空分组'),
+    `应当同时显示两个数量：${textOf(tree).slice(0, 300)}`,
+  )
   const clean = buttonExact(tree, '清理')
   assert.ok(clean, `缺少清理按钮：${reachable(tree)}`)
   assert.equal(clean.props.disabled, false)
@@ -767,14 +819,31 @@ await check('空目录行显示数量并可一键清理', async () => {
   const posted = client.calls.filter(call => call.path === '/__session-recycle/prune-empty')
   assert.equal(posted.length, 1, '应当只发一次清理请求')
   assert.equal(posted[0].method, 'POST')
-  assert.ok(textOf(tree).includes('没有空目录'), `清理后应当归零：${textOf(tree).slice(0, 240)}`)
+  assert.ok(textOf(tree).includes('没有空分组或空目录'), `清理后应当归零：${textOf(tree).slice(0, 300)}`)
+  const banner = await toastText(client)
+  assert.ok(banner.includes('2 个空目录'), `应当报出清掉的数量：${banner}`)
+  assert.ok(banner.includes('1 个空分组'), `应当报出清掉的分组数：${banner}`)
 })
 
-await check('没有空目录时清理按钮禁用', async () => {
+await check('只有空目录时按目录口径报数', async () => {
+  const client = makeClient({ emptyDirs: ['--d-a--'] })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  assert.ok(textOf(tree).includes('当前有 1 个空目录，没有空分组'), textOf(tree).slice(0, 300))
+})
+
+await check('只有空分组时按分组口径报数', async () => {
+  const client = makeClient({ emptyGroups: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj' }] })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  const tree = await client.runtime.render(panel)
+  assert.ok(textOf(tree).includes('当前有 1 个空分组，没有空目录'), textOf(tree).slice(0, 300))
+})
+
+await check('都没有时清理按钮禁用', async () => {
   const client = makeClient({})
   const panel = sectionById(client, 'session-recycle-settings').component
   const tree = await client.runtime.render(panel)
-  assert.ok(textOf(tree).includes('没有空目录'))
+  assert.ok(textOf(tree).includes('没有空分组或空目录'))
   assert.equal(buttonExact(tree, '清理').props.disabled, true)
 })
 

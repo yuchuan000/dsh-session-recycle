@@ -37,21 +37,19 @@ const inject = ['tools']
 // down with it. Reads are tolerant, writes are atomic-ish (temp + rename), and
 // every failure falls back to the documented default.
 
-/**
- * What happens to a workspace the last deletion emptied.
- *
- *   `ask`  — hand the list to the client, which asks the user (the default)
- *   `auto` — remove the grouping (and its empty folder) as part of the delete
- *   `keep` — leave the empty group alone
- */
-export const EMPTY_WORKSPACE_ACTIONS = Object.freeze(['ask', 'auto', 'keep'])
-
 /** Documented defaults; also the fallback for any unreadable or partial file. */
 export const DEFAULT_SETTINGS = Object.freeze({
   /** Ask before deleting a session, or delete immediately on confirm. */
   confirmSingleDelete: true,
-  /** After the last session in a workspace goes: ask, remove it, or keep it. */
-  emptyWorkspaceAction: 'ask',
+  /**
+   * Sweep whatever a deletion left empty: a workspace whose last session just
+   * went, and the session folder that workspace was stored under.
+   *
+   * Off by default, and one switch rather than a policy: either the user wants
+   * this cleaned up for them or they do not, and a checkbox is the honest shape
+   * for that. Nothing is ever removed on a guess.
+   */
+  autoPruneEmpty: false,
   /** Move to the OS recycle bin instead of deleting outright. */
   useRecycleBin: true,
 })
@@ -67,28 +65,22 @@ function boolOr(value, fallback) {
   return typeof value === 'boolean' ? value : fallback
 }
 
-/** Coerce one stored value to a member of `allowed`, falling back otherwise. */
-function enumOr(value, allowed, fallback) {
-  return typeof value === 'string' && allowed.includes(value) ? value : fallback
-}
-
 /**
- * The empty-workspace policy, including its older spelling.
+ * The empty-sweep switch, including both of its older spellings.
  *
- * `askRemoveEmptyWorkspace` was a plain switch where `true` meant "ask" and
- * `false` meant "say nothing, change nothing". Both readings survive the
- * upgrade: `false` maps to `keep`, never to `auto` — "stop asking me" is not
- * the same instruction as "delete it silently", and guessing wrong there would
- * drop groupings the user only ever asked to stop being interrupted about.
+ * The setting has been through two shapes: a three-way string
+ * (`emptyWorkspaceAction`: ask / auto / keep) and, before that, a plain switch
+ * asking whether the user wanted to be *asked* (`askRemoveEmptyWorkspace`).
+ * Exactly one historical value ever meant "remove it without asking" — the
+ * string `'auto'` — so that, and only that, migrates to `true`. Every other
+ * value lands on `false`: "stop asking me" is not the same instruction as
+ * "delete it silently", and guessing wrong there would drop groupings the user
+ * only ever asked to stop being interrupted about.
  */
-function readEmptyAction(parsed) {
-  if (typeof parsed.emptyWorkspaceAction === 'string') {
-    return enumOr(parsed.emptyWorkspaceAction, EMPTY_WORKSPACE_ACTIONS, DEFAULT_SETTINGS.emptyWorkspaceAction)
-  }
-  if (typeof parsed.askRemoveEmptyWorkspace === 'boolean') {
-    return parsed.askRemoveEmptyWorkspace ? 'ask' : 'keep'
-  }
-  return DEFAULT_SETTINGS.emptyWorkspaceAction
+function readAutoPrune(parsed) {
+  if (typeof parsed.autoPruneEmpty === 'boolean') return parsed.autoPruneEmpty
+  if (typeof parsed.emptyWorkspaceAction === 'string') return parsed.emptyWorkspaceAction === 'auto'
+  return DEFAULT_SETTINGS.autoPruneEmpty
 }
 
 /** Read settings; any failure yields the defaults rather than throwing. */
@@ -99,7 +91,7 @@ function readSettings() {
     if (parsed === null || typeof parsed !== 'object') return { ...DEFAULT_SETTINGS }
     return {
       confirmSingleDelete: boolOr(parsed.confirmSingleDelete, DEFAULT_SETTINGS.confirmSingleDelete),
-      emptyWorkspaceAction: readEmptyAction(parsed),
+      autoPruneEmpty: readAutoPrune(parsed),
       useRecycleBin: boolOr(parsed.useRecycleBin, DEFAULT_SETTINGS.useRecycleBin),
     }
   } catch {
@@ -123,16 +115,17 @@ function writeSettings(patch) {
   const given = (key) => patch !== null && typeof patch === 'object' && patch[key] !== undefined
   for (const key of Object.keys(DEFAULT_SETTINGS)) {
     if (!given(key)) continue
-    if (key === 'emptyWorkspaceAction') {
-      if (typeof patch[key] === 'string' && EMPTY_WORKSPACE_ACTIONS.includes(patch[key])) next[key] = patch[key]
-      continue
-    }
     if (typeof patch[key] === 'boolean') next[key] = patch[key]
   }
-  // A cached client bundle may still send the old boolean key. Accepting it
-  // keeps an update from leaving a switch that writes a field nothing reads.
+  // Cached client bundles may still send the older keys, and a rename must not
+  // leave a switch that writes a field nothing reads. `'auto'` is the one
+  // historical value that asked for a silent sweep; the oldest switch only ever
+  // controlled the prompt that no longer exists, so it maps to off.
+  if (given('emptyWorkspaceAction') && typeof patch.emptyWorkspaceAction === 'string') {
+    next.autoPruneEmpty = patch.emptyWorkspaceAction === 'auto'
+  }
   if (given('askRemoveEmptyWorkspace') && typeof patch.askRemoveEmptyWorkspace === 'boolean') {
-    next.emptyWorkspaceAction = patch.askRemoveEmptyWorkspace ? 'ask' : 'keep'
+    next.autoPruneEmpty = false
   }
   let written = false
   try {
@@ -1167,24 +1160,73 @@ export async function removeWorkspace(ctx, workspaceId) {
 }
 
 /**
- * Apply the empty-workspace policy to what a delete just emptied.
+ * Every workspace in the registry that holds no sessions.
  *
- * `ask` is the client's business — it owns the dialog and the host never opens
- * one on its own. `keep` drops the list. `auto` removes the groupings here, so
- * a bulk cleanup does not end with the sidebar full of empty shells the user
- * has to sweep by hand, and each removal takes its empty session folder with
- * it.
+ * The grouping record outlives its sessions: deleting a session detaches its id
+ * from the record and the record stays, which is the right default (a project
+ * the user still works in keeps its place) and the reason a sidebar can end up
+ * with a row of groups holding nothing. Read from the domain table, which is
+ * what the store actually contains.
+ */
+function emptyWorkspaces(ctx) {
+  return currentWorkspaces(ctx).filter(workspace => workspace.sessionIds.length === 0)
+}
+
+/**
+ * Drop every workspace with no sessions left, and the empty folder each left on
+ * disk.
+ *
+ * The manual counterpart to `autoPruneEmpty`, covering what the switch cannot:
+ * groups emptied while it was off, and groups emptied before it existed. Only
+ * session-free groups are touched — a group with even one session is left
+ * exactly as it was — and a group that fails is reported rather than aborting
+ * the sweep.
+ *
+ * @returns { removed: [{ workspaceId, title, path, prunedDirs }], failed }
+ */
+export async function pruneEmptyWorkspaces(ctx) {
+  const removed = []
+  const failed = []
+  for (const workspace of emptyWorkspaces(ctx)) {
+    try {
+      const result = await removeWorkspace(ctx, workspace.workspaceId)
+      removed.push({
+        workspaceId: result.workspaceId,
+        title: workspace.title ?? '',
+        path: workspace.path ?? '',
+        prunedDirs: result.prunedDirs ?? [],
+      })
+    } catch (error) {
+      failed.push({
+        workspaceId: workspace.workspaceId,
+        error: error?.message ?? String(error),
+        code: error?.code ?? null,
+      })
+    }
+  }
+  return { removed, failed }
+}
+
+/**
+ * Apply the empty-sweep switch to what a delete just emptied.
+ *
+ * Only the `autoPruneEmpty` setting reaches here, and only when it is on: the
+ * user turned on "clean up what I emptied", so a bulk delete does not end with
+ * the sidebar full of empty shells to sweep by hand, and each removal takes the
+ * empty session folder with it. With the switch off nothing is removed and the
+ * caller reports the emptied groups as information rather than an offer — a
+ * grouping the user did not ask to lose stays where it is.
  *
  * One workspace failing must not cost the others: the reason lands in `failed`
  * and the loop continues.
  *
- * @returns { action, removed: [{ workspaceId, title, path, prunedDirs }], failed }
- *   `removed` is empty unless the policy is `auto`.
+ * @returns { auto, removed: [{ workspaceId, title, path, prunedDirs }], failed }
+ *   `removed` is empty unless the switch is on.
  */
 async function settleEmptyWorkspaces(ctx, emptied, settings) {
-  const action = settings?.emptyWorkspaceAction ?? DEFAULT_SETTINGS.emptyWorkspaceAction
-  if (action !== 'auto' || !Array.isArray(emptied) || emptied.length === 0) {
-    return { action, removed: [], failed: [] }
+  const auto = settings?.autoPruneEmpty === true
+  if (!auto || !Array.isArray(emptied) || emptied.length === 0) {
+    return { auto, removed: [], failed: [] }
   }
   const removed = []
   const failed = []
@@ -1205,7 +1247,7 @@ async function settleEmptyWorkspaces(ctx, emptied, settings) {
       })
     }
   }
-  return { action, removed, failed }
+  return { auto, removed, failed }
 }
 
 /**
@@ -1632,12 +1674,11 @@ function registerRoutes(host, ctx) {
           projectRemoved: result.projectRemoved,
           workspaceRemoved: result.workspaceRemoved,
           notified: result.notified === true,
-          // Offer-to-clean-up signal: the client asks the user, the host never
-          // removes a workspace on its own — unless the policy says `auto`, in
-          // which case the emptied ones come back under `removedWorkspaces`
-          // and this list is empty so no dialog is raised.
-          emptiedWorkspaces: settled.action === 'ask' ? emptied : [],
-          emptiedWorkspaceAction: settled.action,
+          // Informational: these groupings are empty now. Whether they were
+          // also removed is the `autoPruneEmpty` switch's business, reported
+          // separately so the client never has to guess which happened.
+          emptiedWorkspaces: emptied,
+          autoPruneEmpty: settled.auto,
           removedWorkspaces: settled.removed,
           workspaceRemovalFailed: settled.failed,
         })
@@ -1730,10 +1771,11 @@ function registerRoutes(host, ctx) {
         ok: true,
         deleted,
         failed,
-        // `auto` already removed them; `keep` leaves them; only `ask` is the
-        // client's to put in front of the user.
-        emptiedWorkspaces: settled.action === 'ask' ? [...emptiedById.values()] : [],
-        emptiedWorkspaceAction: settled.action,
+        // Same split as the single delete: what went empty, and what the switch
+        // then did about it. Under `autoPruneEmpty` the host has already
+        // removed them, so `removedWorkspaces` is what the client reports.
+        emptiedWorkspaces: [...emptiedById.values()],
+        autoPruneEmpty: settled.auto,
         removedWorkspaces: settled.removed,
         workspaceRemovalFailed: settled.failed,
       })
@@ -1769,11 +1811,12 @@ function registerRoutes(host, ctx) {
         sendJson(response, 400, { ok: false, error: 'body must be an object' })
         return
       }
-      // `askRemoveEmptyWorkspace` is accepted on purpose rather than treated as
-      // a typo: it is the older spelling of `emptyWorkspaceAction`, and a
-      // client bundle cached from before the rename can still send it.
-      // `writeSettings` translates it, so the switch keeps working either way.
-      const writable = [...Object.keys(DEFAULT_SETTINGS), 'askRemoveEmptyWorkspace']
+      // `emptyWorkspaceAction` and `askRemoveEmptyWorkspace` are accepted on
+      // purpose rather than treated as typos: they are the older spellings of
+      // `autoPruneEmpty`, and a client bundle cached from before the rename can
+      // still send either. `writeSettings` translates both, so the switch keeps
+      // working either way.
+      const writable = [...Object.keys(DEFAULT_SETTINGS), 'emptyWorkspaceAction', 'askRemoveEmptyWorkspace']
       const unknown = Object.keys(body).filter(key => !writable.includes(key))
       if (unknown.length > 0) {
         sendJson(response, 400, { ok: false, error: `unknown setting: ${unknown.join(', ')}` })
@@ -1923,14 +1966,14 @@ function registerRoutes(host, ctx) {
     },
   }))
 
-  // --- empty session folders --------------------------------------------------
+  // --- empty session folders and empty groups ---------------------------------
   //
-  // The store keeps one folder per working directory, and deleting every
-  // session of a project leaves that folder behind with nothing in it. Nothing
-  // breaks — DSH recreates the name on demand — but a store that has been
-  // cleaned out still shows a folder per project the user ever opened. These
-  // two routes let the settings page count them and sweep them in one click,
-  // which is also the only way to clear the ones earlier versions left behind.
+  // Two things a deletion can leave behind with nothing in them: the folder the
+  // store keeps per working directory, and the workspace grouping record. The
+  // store folder carries no data (DSH recreates the name on demand) and a group
+  // with no sessions has nothing to show, but both clutter what the user sees,
+  // so these two routes let the settings page count them and sweep them in one
+  // click — which is also the only way to clear what earlier versions left.
 
   disposers.push(host.register({
     kind: 'exact',
@@ -1945,7 +1988,18 @@ function registerRoutes(host, ctx) {
         return
       }
       const dirs = listEmptySessionFolders()
-      sendJson(response, 200, { ok: true, dirs, count: dirs.length })
+      const workspaces = emptyWorkspaces(ctx)
+      sendJson(response, 200, {
+        ok: true,
+        dirs,
+        count: dirs.length,
+        workspaces: workspaces.map(workspace => ({
+          workspaceId: workspace.workspaceId,
+          title: workspace.title,
+          path: workspace.path,
+        })),
+        workspaceCount: workspaces.length,
+      })
     },
   }))
 
@@ -1963,7 +2017,18 @@ function registerRoutes(host, ctx) {
         return
       }
       const removed = pruneEmptySessionFolders()
-      sendJson(response, 200, { ok: true, removed, count: removed.length })
+      // Folders first, then the groups that would have pruned them anyway, so a
+      // folder is never reported twice and the group sweep finds it already
+      // gone.
+      const pruned = await pruneEmptyWorkspaces(ctx)
+      sendJson(response, 200, {
+        ok: true,
+        removed,
+        count: removed.length,
+        removedWorkspaces: pruned.removed,
+        workspaceCount: pruned.removed.length,
+        failed: pruned.failed,
+      })
     },
   }))
 
@@ -2031,7 +2096,13 @@ function apply(ctx) {
     async execute(args) {
       const sessionId = String(args?.sessionId ?? '').trim()
       try {
-        const result = await deleteSession(ctx, sessionId, { permanent: args?.permanent === true })
+        // Honor the same switch the settings page does, so a delete driven from
+        // the agent leaves the store in the state the user configured instead
+        // of only the UI doing it.
+        const settings = readSettings()
+        const result = await deleteSession(ctx, sessionId, { permanent: args?.permanent === true, settings })
+        const emptied = result.emptiedWorkspaces ?? []
+        const settled = await settleEmptyWorkspaces(ctx, emptied, settings)
         const lines = [
           `deleted ${result.sessionId}`,
           `directories removed: ${result.dirsRemoved}`,
@@ -2043,8 +2114,14 @@ function apply(ctx) {
         if (!result.permanent && result.dirsRemoved > 0) {
           lines.push('recoverable: the log was moved to the system recycle bin')
         }
-        for (const workspace of result.emptiedWorkspaces ?? []) {
-          lines.push(`note: workspace "${workspace.title || workspace.path}" is now empty; use workspace_remove to drop the group`)
+        for (const workspace of settled.removed) {
+          lines.push(`removed the emptied workspace "${workspace.title || workspace.path}" and the folder it left on disk`)
+        }
+        for (const workspace of settled.failed) {
+          lines.push(`could not remove the emptied workspace "${workspace.workspaceId}": ${workspace.error}`)
+        }
+        for (const workspace of settled.auto ? [] : emptied) {
+          lines.push(`note: workspace "${workspace.title || workspace.path}" is now empty; use workspace_remove to drop the group, or turn on the "auto-prune emptied workspaces" setting to have it done on every delete`)
         }
         return lines.join('\n')
       } catch (error) {
