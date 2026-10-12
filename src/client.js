@@ -68,14 +68,21 @@ window.__ModuleLoader__.load({
       'settings.useRecycleBin': '删除时移入回收站',
       'settings.useRecycleBinHint': '关闭后删除不可恢复。默认开启。',
       'settings.binOffWarning': '⚠ 回收站已关闭：删除将无法还原。',
-      'settings.confirmSingleDelete': '删除单个会话时先确认',
-      'settings.confirmSingleDeleteHint': '关闭后点删除会直接执行，不再弹确认框。',
+      'settings.confirmSingleDelete': '删除会话前先确认',
+      'settings.confirmSingleDeleteHint': '关闭后，点删除（单个或所选）直接执行，不再弹确认框。',
+      'settings.confirmForcedHint': '回收站已关闭：删除不可还原，所以始终会先确认。',
       'settings.autoPrune': '删除后自动清理空分组与空目录',
-      'settings.autoPruneHint': '勾选后，删除会话时会检查它所属的工作区是否已经空了：空了就连同该分组一起移除，并清掉它在磁盘上留下的空文件夹（例如 sessions/--d-work-proj--）。项目文件夹与会话日志不受影响。',
+      'settings.autoPruneHint': '勾选后，删除会话时会检查它所属的工作区是否已经空了：空了就连同该分组一起移除，并清掉这次删除留下的空文件夹 —— 分组目录与会话自己的目录（会话在子目录里打开时是另一个名字）都清。项目文件夹与会话日志不受影响。',
       'settings.emptyAutoRemoved': '已一并移除 {n} 个空工作区',
+      'settings.emptyAutoDirs': '已一并清理 {n} 个空目录',
+      'settings.emptyAutoBoth': '已一并移除 {m} 个空工作区、清理 {d} 个空目录',
       'settings.emptyAutoFailed': '有 {n} 个空工作区移除失败',
       'settings.cleanup': '空分组与空目录',
-      'settings.cleanupHint': '没有会话的分组，以及会话删光后留在磁盘上的空文件夹（例如 sessions/--d-work-proj--），可以一次清掉。',
+      // The relation to the switch above, spelled out: the switch fires only on
+      // this plugin's own deletes, so anything left by another route — or by a
+      // delete that ran while the switch was off — is collected here. Without
+      // this sentence the row reads like a duplicate of the switch.
+      'settings.cleanupHint': '手动兜底：清掉以前留下的、或自动清理没赶上的空分组与空目录。上面那个开关只在「本插件删除会话」时触发，用别的方式删掉的会话留下的空壳要在这里收。',
       'settings.cleanupCount': '当前有 {dirs} 个空目录、{workspaces} 个空分组',
       'settings.cleanupCountDirs': '当前有 {n} 个空目录，没有空分组',
       'settings.cleanupCountWorkspaces': '当前有 {n} 个空分组，没有空目录',
@@ -118,10 +125,15 @@ window.__ModuleLoader__.load({
       'settings.confirmDeleteMany': '确定删除这 {n} 个会话吗？日志会移入回收站，可随时还原。',
       'settings.confirmDeleteManyPermanent': '⚠ 回收站已关闭：这 {n} 个会话将被永久删除，无法还原。确定继续吗？',
       'settings.cancel': '取消',
-      'settings.deletedMany': '已删除 {n} 个会话。',
-      'settings.deletedManyPruned': '已删除 {n} 个会话，并移除 {m} 个空分组。',
-      'settings.deletedManyPartial': '已删除 {ok} 个，{fail} 个失败。',
-      'settings.deletedManyPartialPruned': '已删除 {ok} 个，{fail} 个失败，并移除 {m} 个空分组。',
+      // The batch result is one sentence assembled from a main clause and an
+      // optional "and the sweep also cleared…" tail, rather than a string per
+      // combination: the tail has three shapes and the clause two, and a table
+      // of all six would be six chances to let them drift apart.
+      'settings.deletedMany': '已删除 {n} 个会话{extra}。',
+      'settings.deletedManyPartial': '已删除 {ok} 个，{fail} 个失败{extra}。',
+      'settings.sweptGroups': '，并移除 {m} 个空分组',
+      'settings.sweptDirs': '，并清理 {d} 个空目录',
+      'settings.sweptBoth': '，移除 {m} 个空分组并清理 {d} 个空目录',
 
       // 两个列表是同一页上的两个标签页：标题取列表名，徽标是各自的条数。
       'settings.tabsLabel': '会话删除页签',
@@ -162,14 +174,17 @@ window.__ModuleLoader__.load({
       'settings.useRecycleBin': 'Move deleted sessions to the recycle bin',
       'settings.useRecycleBinHint': 'When off, deletion cannot be undone. On by default.',
       'settings.binOffWarning': '⚠ The recycle bin is off: deletions cannot be restored.',
-      'settings.confirmSingleDelete': 'Confirm before deleting a session',
-      'settings.confirmSingleDeleteHint': 'When off, clicking delete acts immediately with no dialog.',
+      'settings.confirmSingleDelete': 'Confirm before deleting sessions',
+      'settings.confirmSingleDeleteHint': 'When off, deleting — one session or a selection — acts immediately with no confirmation.',
+      'settings.confirmForcedHint': 'The recycle bin is off, so a delete cannot be undone and is always confirmed.',
       'settings.autoPrune': 'Clean up emptied groups and folders after a delete',
-      'settings.autoPruneHint': 'When on, a delete checks whether the workspace the session belonged to is now empty: if it is, the group goes too, along with the empty folder it left on disk (e.g. sessions/--d-work-proj--). The project folder and every session log are untouched.',
+      'settings.autoPruneHint': 'When on, a delete checks whether the workspace the session belonged to is now empty: if it is, the group goes too, along with the folders this deletion emptied — the group\'s folder and the session\'s own (a different name when the session was opened in a sub-directory). The project folder and every session log are untouched.',
       'settings.emptyAutoRemoved': 'Also removed {n} empty workspace(s)',
+      'settings.emptyAutoDirs': 'Also cleaned {n} empty folder(s)',
+      'settings.emptyAutoBoth': 'Also removed {m} empty workspace(s) and cleaned {d} empty folder(s)',
       'settings.emptyAutoFailed': '{n} empty workspace(s) could not be removed',
       'settings.cleanup': 'Empty groups and folders',
-      'settings.cleanupHint': 'Groups with no sessions left, and the empty folders a cleaned-out store keeps for each project (e.g. sessions/--d-work-proj--), can be swept in one click.',
+      'settings.cleanupHint': 'The manual fallback: sweeps empty groups and folders left over from earlier deletions, or from ones the automatic sweep did not run for. The switch above only fires on a delete this plugin performs, so shells left by any other route are collected here.',
       'settings.cleanupCount': '{dirs} empty folder(s) and {workspaces} empty group(s)',
       'settings.cleanupCountDirs': '{n} empty folder(s), no empty group',
       'settings.cleanupCountWorkspaces': '{n} empty group(s), no empty folder',
@@ -213,10 +228,11 @@ window.__ModuleLoader__.load({
       'settings.confirmDeleteMany': 'Delete these {n} session(s)? Their logs move to the recycle bin and can be restored.',
       'settings.confirmDeleteManyPermanent': '⚠ The recycle bin is off: these {n} session(s) are deleted permanently and cannot be restored. Continue?',
       'settings.cancel': 'Cancel',
-      'settings.deletedMany': 'Deleted {n} session(s).',
-      'settings.deletedManyPruned': 'Deleted {n} session(s) and removed {m} empty group(s).',
-      'settings.deletedManyPartial': 'Deleted {ok}, {fail} failed.',
-      'settings.deletedManyPartialPruned': 'Deleted {ok}, {fail} failed, and removed {m} empty group(s).',
+      'settings.deletedMany': 'Deleted {n} session(s){extra}.',
+      'settings.deletedManyPartial': 'Deleted {ok}, {fail} failed{extra}.',
+      'settings.sweptGroups': ', and removed {m} empty group(s)',
+      'settings.sweptDirs': ', and cleaned {d} empty folder(s)',
+      'settings.sweptBoth': ', and removed {m} empty group(s) plus cleaned {d} empty folder(s)',
 
       // Two lists, two tabs on one page: the title is the list's own name and
       // the badge is how much each one is holding.
@@ -272,6 +288,20 @@ window.__ModuleLoader__.load({
     function settingsValue(key) {
       const value = settingsState.values[key]
       return typeof value === 'boolean' ? value : SETTINGS_DEFAULTS[key]
+    }
+
+    /**
+     * Whether a delete has to be asked about first.
+     *
+     * The Configure switch answers for the reversible case, and it is a single
+     * answer for both entry points — the sidebar row's own delete and the
+     * batch on this page's list. A delete with the recycle bin off is the one
+     * case the switch cannot cover: it cannot be undone, so it is confirmed
+     * regardless. The switch is about not being nagged, not about agreeing to
+     * lose data, and the hint next to it says so.
+     */
+    function needsConfirm() {
+      return settingsValue('confirmSingleDelete') || settingsValue('useRecycleBin') === false
     }
 
     /** Load once; failures keep the documented defaults. */
@@ -571,10 +601,11 @@ window.__ModuleLoader__.load({
      * race itself — a workspace emptied by the third call is already gone by
      * the time the seventh looks for it.
      *
-     * @returns { deleted, failed, emptiedWorkspaces, removedWorkspaces } from
-     *   the host. `emptiedWorkspaces` is what the batch left empty;
-     *   `removedWorkspaces` is the subset the `autoPruneEmpty` switch then
-     *   removed, so the client reports instead of asking.
+     * @returns { deleted, failed, emptiedWorkspaces, removedWorkspaces,
+     *   prunedDirs } from the host. `emptiedWorkspaces` is what the batch left
+     *   empty; `removedWorkspaces` is the subset the `autoPruneEmpty` switch
+     *   then removed, and `prunedDirs` every folder that sweep also cleared
+     *   (the group's folder and the session's own are not always the same one).
      */
     async function deleteSessions(sessionIds, permanent) {
       const payload = await api('/__session-recycle/delete-many', {
@@ -586,8 +617,27 @@ window.__ModuleLoader__.load({
         failed: Array.isArray(payload.failed) ? payload.failed : [],
         emptiedWorkspaces: Array.isArray(payload.emptiedWorkspaces) ? payload.emptiedWorkspaces : [],
         removedWorkspaces: Array.isArray(payload.removedWorkspaces) ? payload.removedWorkspaces : [],
+        prunedDirs: Array.isArray(payload.prunedDirs) ? payload.prunedDirs : [],
         workspaceRemovalFailed: Array.isArray(payload.workspaceRemovalFailed) ? payload.workspaceRemovalFailed : [],
       }
+    }
+
+    /**
+     * The "…and the sweep also cleared X" tail of a batch result.
+     *
+     * Assembled here rather than picked from one key per combination, and
+     * reported even when it is empty so the caller can always hand `{extra}`
+     * to the template — an unfilled placeholder would render as literal braces.
+     *
+     * @returns a string starting with a separator, or '' when nothing was swept.
+     */
+    function sweptSuffix(translate, removedWorkspaces, prunedDirs) {
+      const groups = Array.isArray(removedWorkspaces) ? removedWorkspaces.length : 0
+      const dirs = Array.isArray(prunedDirs) ? prunedDirs.length : 0
+      if (groups > 0 && dirs > 0) return translate('settings.sweptBoth', { m: groups, d: dirs })
+      if (groups > 0) return translate('settings.sweptGroups', { m: groups })
+      if (dirs > 0) return translate('settings.sweptDirs', { d: dirs })
+      return ''
     }
 
     /**
@@ -1406,8 +1456,20 @@ window.__ModuleLoader__.load({
     function reportAutoRemoval(result, translate) {
       const __ = translate || t
       const removed = Array.isArray(result?.removedWorkspaces) ? result.removedWorkspaces : []
-      if (removed.length === 0) return
-      showToast(__('settings.emptyAutoRemoved', { n: removed.length }), 'success')
+      const dirs = Array.isArray(result?.prunedDirs) ? result.prunedDirs : []
+      if (removed.length === 0 && dirs.length === 0) return
+      // Two facts, one banner. The group is the visible one — a sidebar row
+      // disappears. The folder is the one the user only notices later, when
+      // the store has collected a shell per project, so it is said too: a
+      // silent sweep is indistinguishable from a sweep that did not happen.
+      showToast(
+        removed.length > 0 && dirs.length > 0
+          ? __('settings.emptyAutoBoth', { m: removed.length, d: dirs.length })
+          : removed.length > 0
+            ? __('settings.emptyAutoRemoved', { n: removed.length })
+            : __('settings.emptyAutoDirs', { n: dirs.length }),
+        'success',
+      )
     }
 
     function DeleteDialog(props) {
@@ -1643,7 +1705,10 @@ window.__ModuleLoader__.load({
         React.createElement(SettingRow, {
           key: 'confirm',
           label: __('settings.confirmSingleDelete'),
-          hint: __('settings.confirmSingleDeleteHint'),
+          // With the bin off the switch cannot be honoured — an irreversible
+          // delete is always asked about — so the row says why instead of
+          // letting the user turn it off and wonder why they were still asked.
+          hint: binOff ? __('settings.confirmForcedHint') : __('settings.confirmSingleDeleteHint'),
           checked: settingsValue('confirmSingleDelete'),
           onChange: (value) => updateSetting('confirmSingleDelete', value),
         }),
@@ -1969,17 +2034,14 @@ window.__ModuleLoader__.load({
           // re-read happens only when at least one of them went there.
           if (result.deleted.some(entry => entry.recycled === true)) refreshRecycleCount()
           // One banner, not two: the sweep's own "removed 3 groups" toast would
-          // be replaced by the delete count a line later, so the number that
-          // explains why a sidebar group vanished has to ride along with it.
-          const prunedGroups = result.removedWorkspaces.length
+          // be replaced by the delete count a line later, so the numbers that
+          // explain why a sidebar group and a store folder vanished have to
+          // ride along with it.
+          const extra = sweptSuffix(__, result.removedWorkspaces, result.prunedDirs)
           showToast(
             result.failed.length === 0
-              ? (prunedGroups > 0
-                  ? __('settings.deletedManyPruned', { n: result.deleted.length, m: prunedGroups })
-                  : __('settings.deletedMany', { n: result.deleted.length }))
-              : (prunedGroups > 0
-                  ? __('settings.deletedManyPartialPruned', { ok: result.deleted.length, fail: result.failed.length, m: prunedGroups })
-                  : __('settings.deletedManyPartial', { ok: result.deleted.length, fail: result.failed.length })),
+              ? __('settings.deletedMany', { n: result.deleted.length, extra })
+              : __('settings.deletedManyPartial', { ok: result.deleted.length, fail: result.failed.length, extra }),
             'success',
           )
           // One message block: a session that refused to delete and a workspace
@@ -2054,7 +2116,9 @@ window.__ModuleLoader__.load({
             type: 'button',
             style: deleteIds.length === 0 || busy ? dangerOutlineBtnOffStyle : dangerOutlineBtnStyle,
             disabled: deleteIds.length === 0 || busy,
-            onClick: () => setConfirming(true),
+            // Asking is the Configure switch's call, not this button's. With it
+            // off the batch goes straight through — the click was the decision.
+            onClick: () => { if (needsConfirm()) setConfirming(true); else onDelete() },
           }, busy ? __('settings.deleting') : __('settings.deletePicked')),
         ]),
 

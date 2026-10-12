@@ -346,6 +346,57 @@ export function listEmptySessionFolders() {
   return out.sort()
 }
 
+/**
+ * Remove the folder each just-deleted session lived in, when that delete is
+ * what emptied it.
+ *
+ * The folder is taken from the session's own path, NOT from its workspace's
+ * path. A group is keyed on the project root, but a session can be opened in
+ * any sub-directory of it, and DSH files it under a folder named after *that*
+ * cwd. Pruning only the workspace's folder therefore misses every session that
+ * was not started in the root — which is exactly the empty folder the
+ * "clean up emptied groups and folders" switch promises to clear.
+ *
+ * The non-recursive `rmdir` does the safety work again: a folder that still
+ * holds a session was not emptied by this call and is left where it is.
+ *
+ * @param dirs - the session directories that were just removed.
+ * @returns the absolute folder paths that were removed.
+ */
+export function pruneEmptyParentFolders(dirs) {
+  const root = sessionsRoot()
+  const removed = []
+  const seen = new Set()
+  for (const dir of Array.isArray(dirs) ? dirs : []) {
+    if (typeof dir !== 'string' || dir.length === 0) continue
+    const parent = path.dirname(path.resolve(dir))
+    if (seen.has(parent)) continue
+    seen.add(parent)
+    if (parent === root || !parent.startsWith(root + path.sep)) continue
+    try {
+      if (!fs.lstatSync(parent).isDirectory()) continue
+      if (fs.readdirSync(parent).length > 0) continue
+      fs.rmdirSync(parent)
+      removed.push(parent)
+    } catch { /* already gone, or raced with a new session: leave it */ }
+  }
+  return removed
+}
+
+/** The same list, de-duplicated, in first-seen order. */
+function uniqueDirs(...lists) {
+  const out = []
+  const seen = new Set()
+  for (const list of lists) {
+    for (const dir of Array.isArray(list) ? list : []) {
+      if (typeof dir !== 'string' || dir.length === 0 || seen.has(dir)) continue
+      seen.add(dir)
+      out.push(dir)
+    }
+  }
+  return out
+}
+
 /** Sweep every empty session folder. @returns the names removed. */
 export function pruneEmptySessionFolders() {
   const root = sessionsRoot()
@@ -1318,6 +1369,7 @@ export async function deleteSession(ctx, sessionId, { permanent = false, setting
       sessionId,
       recycled: [],
       dirsRemoved: 0,
+      prunedDirs: [],
       permanent: false,
       ...swept,
       stopped: false,
@@ -1367,6 +1419,17 @@ export async function deleteSession(ctx, sessionId, { permanent = false, setting
 
   const swept = await stripStorageDomains(ctx, sessionId, { workspace: true })
   const emptiedWorkspaces = emptiedFromHolders(ctx, holders)
+  // Where the session used to live, read off the paths that were just cleared.
+  //
+  // This is the second half of the auto-sweep switch. `removeWorkspace` prunes
+  // the *group's* folder, which only ever matches a session started in the
+  // project root; a session opened in a sub-directory sits in a folder of its
+  // own, and that is the folder this delete just emptied. Doing it from `dirs`
+  // rather than from a cwd means the encoding never has to be guessed at: the
+  // path in hand is by construction the one DSH derived.
+  const prunedDirs = effective.autoPruneEmpty === true
+    ? pruneEmptyParentFolders(recycled.map(entry => entry.dir))
+    : []
   // Every index now agrees the session is gone, so the list can hear about it.
   const notified = notifySessionRemoved(ctx, sessionId)
 
@@ -1404,6 +1467,7 @@ export async function deleteSession(ctx, sessionId, { permanent = false, setting
     sessionId,
     recycled,
     dirsRemoved: recycled.length,
+    prunedDirs,
     permanent: !useBin,
     ...swept,
     stopped,
@@ -1696,11 +1760,19 @@ function registerRoutes(host, ctx) {
         const result = await deleteSession(ctx, sessionId, { permanent: body?.permanent === true, settings })
         const emptied = result.emptiedWorkspaces ?? []
         const settled = await settleEmptyWorkspaces(ctx, emptied, settings)
+        // Both halves of the sweep, de-duplicated: the group's folder and the
+        // session's own folder are usually the same one, and reporting it twice
+        // would read as two folders cleaned.
+        const prunedDirs = uniqueDirs(
+          result.prunedDirs,
+          settled.removed.flatMap(entry => entry.prunedDirs ?? []),
+        )
         sendJson(response, 200, {
           ok: true,
           sessionId: result.sessionId,
           permanent: result.permanent,
           dirsRemoved: result.dirsRemoved,
+          prunedDirs,
           projectRemoved: result.projectRemoved,
           workspaceRemoved: result.workspaceRemoved,
           notified: result.notified === true,
@@ -1770,9 +1842,14 @@ function registerRoutes(host, ctx) {
       const deleted = []
       const failed = []
       const emptiedById = new Map()
+      // Session folders this batch emptied, usually one per distinct cwd. They
+      // are collected here rather than re-derived later, because the path is
+      // gone the moment the delete returns.
+      const sweptDirs = []
       for (const sessionId of sessionIds) {
         try {
           const result = await deleteSession(ctx, sessionId, { permanent, settings })
+          for (const dir of result.prunedDirs ?? []) sweptDirs.push(dir)
           deleted.push({
             sessionId,
             // `result.recycled` is the store-loop log and it records permanent
@@ -1807,6 +1884,9 @@ function registerRoutes(host, ctx) {
         emptiedWorkspaces: [...emptiedById.values()],
         autoPruneEmpty: settled.auto,
         removedWorkspaces: settled.removed,
+        // Every folder the batch left empty, group folders and session folders
+        // together, reported once each.
+        prunedDirs: uniqueDirs(sweptDirs, settled.removed.flatMap(entry => entry.prunedDirs ?? [])),
         workspaceRemovalFailed: settled.failed,
       })
     },

@@ -408,6 +408,9 @@ function makeClient({
   // switch then removed.
   emptiedWorkspaces = [],
   removedWorkspaces = [],
+  // Folders the host's sweep also cleared: the group's folder and the session's
+  // own are not always the same one, so they are reported separately.
+  deletedPrunedDirs = [],
   workspaceRemovalFailed = [],
 } = {}) {
   const runtime = createRuntime()
@@ -515,6 +518,7 @@ function makeClient({
         failed: [],
         emptiedWorkspaces,
         removedWorkspaces,
+        prunedDirs: deletedPrunedDirs,
         workspaceRemovalFailed,
       })
     }
@@ -831,12 +835,12 @@ await check('tabs 之外的设置项都收进右上角「配置」按钮', async
   const { page, config } = await openConfig(client)
   const text = textOf(page)
   // The page is two lists and a tab strip. Every preference lives in the dialog.
-  assert.ok(!text.includes('删除单个会话时先确认'), `页面上不该再有设置项：${text}`)
+  assert.ok(!text.includes('删除会话前先确认'), `页面上不该再有设置项：${text}`)
   assert.ok(!text.includes('空分组与空目录'), `页面上不该再有清理行：${text}`)
   assert.equal(prefBox(page, '删除'), undefined, '页面上不该有设置行的复选框')
   assert.ok(config, '「配置」按钮应当打开配置弹窗')
   const dialogText = textOf(config)
-  assert.ok(dialogText.includes('删除单个会话时先确认'), `弹窗缺少开关：${dialogText}`)
+  assert.ok(dialogText.includes('删除会话前先确认'), `弹窗缺少开关：${dialogText}`)
   assert.ok(dialogText.includes('删除后自动清理空分组与空目录'), `弹窗缺少开关：${dialogText}`)
   assert.ok(dialogText.includes('删除时移入回收站'), `弹窗缺少开关：${dialogText}`)
   assert.ok(dialogText.includes('空分组与空目录'), `弹窗缺少清理行：${dialogText}`)
@@ -924,6 +928,73 @@ await check('回收站关闭时确认文案改为永久删除的警告', async (
   buttonByText(tree, '删除所选').props.onClick()
   tree = await client.runtime.settle(panel)
   assert.ok(textOf(tree).includes('永久删除'), `缺少永久删除警告：${textOf(tree)}`)
+})
+
+// --- 4b. the Configure switch decides whether the page asks -------------------
+//
+// The page always used to ask. It now reads the same `confirmSingleDelete`
+// switch the sidebar row does, so "do not nag me" means the same thing in both
+// places — with one exception the switch cannot cover.
+
+const deletesSent = (client) => client.calls.filter(call => call.path === '/__session-recycle/delete-many')
+
+await check('关掉「先确认」后，本页删除一次点击就是一次删除', async () => {
+  const client = makeClient({ sessions: SESSIONS, settings: { confirmSingleDelete: false } })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+  for (const box of boxes(tree)) box.props.onChange()
+  tree = await client.runtime.settle(panel)
+
+  buttonByText(tree, '删除所选').props.onClick()
+  tree = await client.runtime.settle(panel)
+
+  assert.ok(!textOf(tree).includes('确定删除这'), `关掉开关就不该再问：${textOf(tree).slice(0, 300)}`)
+  assert.equal(deletesSent(client).length, 1, '一次点击就是一次删除')
+  assert.deepEqual(deletesSent(client)[0].body.sessionIds.sort(), ['session-1', 'session-2'])
+})
+
+await check('开关开着时本页仍旧先问一句', async () => {
+  const client = makeClient({ sessions: SESSIONS, settings: { confirmSingleDelete: true } })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+  for (const box of boxes(tree)) box.props.onChange()
+  tree = await client.runtime.settle(panel)
+
+  buttonByText(tree, '删除所选').props.onClick()
+  tree = await client.runtime.settle(panel)
+
+  assert.ok(textOf(tree).includes('确定删除这 2 个会话吗'), `开着开关就该问：${textOf(tree).slice(0, 300)}`)
+  assert.equal(deletesSent(client).length, 0, '问完之前不得发请求')
+})
+
+await check('回收站关闭时，即使关掉「先确认」也仍要问', async () => {
+  // The switch is about not being nagged, not about agreeing to lose data:
+  // with the bin off there is no way back, so one confirmation stands.
+  const client = makeClient({
+    sessions: SESSIONS,
+    settings: { confirmSingleDelete: false, useRecycleBin: false },
+  })
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+  for (const box of boxes(tree)) box.props.onChange()
+  tree = await client.runtime.settle(panel)
+
+  buttonByText(tree, '删除所选').props.onClick()
+  tree = await client.runtime.settle(panel)
+
+  assert.ok(textOf(tree).includes('永久删除'), `不可还原的删除必须问一次：${textOf(tree).slice(0, 300)}`)
+  assert.equal(deletesSent(client).length, 0, '确认之前不得发请求')
+})
+
+await check('回收站关闭时，配置里那行说明为什么关不掉', async () => {
+  const client = makeClient({ settings: { useRecycleBin: false } })
+  const { config } = await openConfig(client)
+  const text = textOf(config)
+  assert.ok(text.includes('始终会先确认'), `应当说明原因，而不是让人以为设置失灵：${text.slice(0, 400)}`)
+  // The reversible case keeps the ordinary hint.
+  const onClient = makeClient({ settings: { confirmSingleDelete: false } })
+  const { config: onConfig } = await openConfig(onClient)
+  assert.ok(textOf(onConfig).includes('直接执行'), `回收站开着时说的是普通行为：${textOf(onConfig).slice(0, 400)}`)
 })
 
 // --- 5. the recycle tab ------------------------------------------------------
@@ -1113,6 +1184,49 @@ await check('开关关闭时，删除不触碰任何分组', async () => {
   assert.deepEqual(drainEvents('dsh-session-recycle:empty-workspace'), [], '不该弹询问')
   const banner = await toastText(client)
   assert.ok(!banner.includes('空分组'), `没有移除分组就不该提分组：${banner}`)
+})
+
+/** Tick everything, delete, confirm, and read the one banner that lands. */
+async function deleteAllAndReadBanner(client) {
+  const panel = sectionById(client, 'session-recycle-settings').component
+  let tree = await client.runtime.render(panel)
+  for (const box of boxes(tree)) box.props.onChange()
+  tree = await client.runtime.settle(panel)
+  buttonByText(tree, '删除所选').props.onClick()
+  tree = await client.runtime.settle(panel)
+  if (textOf(tree).includes('确定删除这')) {
+    await confirmDeleteButton(tree).props.onClick()
+    tree = await client.runtime.settle(panel)
+  }
+  return toastText(client)
+}
+
+await check('分组与目录都清了，同一句横幅里都报出来', async () => {
+  const client = makeClient({
+    sessions: SESSIONS,
+    settings: { autoPruneEmpty: true },
+    removedWorkspaces: [{ workspaceId: 'ws-1', title: 'proj', path: 'd:/work/proj', prunedDirs: [] }],
+    deletedPrunedDirs: ['C:/dsh/sessions/--d-work-settle--'],
+  })
+  const banner = await deleteAllAndReadBanner(client)
+  assert.ok(banner.includes('已删除 2 个会话'), `应当报出删了几条：${banner}`)
+  assert.ok(banner.includes('移除 1 个空分组并清理 1 个空目录'),
+    `分组和目录要在一句里报全：${banner}`)
+})
+
+await check('只清了空目录时，横幅只提目录', async () => {
+  // The sub-directory case: the group folder was never there, but the folder
+  // this session lived in was emptied and swept — reporting nothing would look
+  // exactly like the bug it replaces.
+  const client = makeClient({
+    sessions: SESSIONS,
+    settings: { autoPruneEmpty: true },
+    removedWorkspaces: [],
+    deletedPrunedDirs: ['C:/dsh/sessions/--d-work-settle--'],
+  })
+  const banner = await deleteAllAndReadBanner(client)
+  assert.ok(banner.includes('并清理 1 个空目录'), `应当报出目录数：${banner}`)
+  assert.ok(!banner.includes('空分组'), `没有动分组就不该提分组：${banner}`)
 })
 
 await check('工作区移除失败时，提示不会被会话失败的文案顶掉', async () => {

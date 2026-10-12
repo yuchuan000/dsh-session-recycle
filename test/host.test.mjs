@@ -578,6 +578,93 @@ for (const [auto, expectRemoved] of [[true, true], [false, false]]) {
   rmSync(root, { recursive: true, force: true })
 }
 
+// --- 5f3. the sweep reaches a session's own folder, not just the group's ---
+//
+// A group is keyed on the project root, but a session can be opened in a
+// sub-directory of it, and DSH files it under a folder named after *that* cwd.
+// Pruning the workspace's folder alone therefore leaves the sub-directory's
+// folder behind — precisely the empty folder the switch promises to clear.
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5f3-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const projectCwd = 'd:/work/mono'
+  const subCwd = 'd:/work/mono/apps/web'
+  const subSlug = mod.sessionFolderName(subCwd)
+  const rootSlug = mod.sessionFolderName(projectCwd)
+  const sid = 'session-eeee1111-2222-3333-4444-555555555553'
+  makeSession(sessionsRoot, subSlug, sid, subCwd)
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ autoPruneEmpty: true }))
+
+  const { routes, ctx } = mountRoutes(root)
+  ctx.registry.enabled = true
+  ctx.workspaces.set('ws-mono', { id: 'ws-mono', title: 'mono', path: projectCwd, sessionIds: [sid] })
+
+  const res = await callRoute(routes, '/__session-recycle/delete', makeRequest('POST', { sessionId: sid }))
+  const payload = res.json()
+
+  check('子目录会话：目录名与分组目录本就不同', () => assert.notEqual(rootSlug, subSlug))
+  check('子目录会话：删完清掉的是它自己那个空目录', () => {
+    assert.equal(res.status, 200)
+    assert.equal(payload.removedWorkspaces.length, 1, '分组空了，仍按开关移除')
+    assert.deepEqual(payload.prunedDirs, [join(sessionsRoot, subSlug)],
+      `prunedDirs 要报出会话自己的目录：${JSON.stringify(payload.prunedDirs)}`)
+    assert.equal(existsSync(join(sessionsRoot, subSlug)), false, '子目录留下的空文件夹应当被清掉')
+  })
+  rmSync(root, { recursive: true, force: true })
+}
+
+// --- 5f4. the folder sweep is still bounded by emptiness, and by the switch ---
+{
+  const root = mkdtempSync(join(tmpdir(), 'sr-test5f4-'))
+  process.env.DSH_HOME = root
+  const sessionsRoot = join(root, 'sessions')
+  const subCwd = 'd:/work/mono/apps/web'
+  const subSlug = mod.sessionFolderName(subCwd)
+  const keep = 'session-eeee1111-2222-3333-4444-555555555554'
+  const gone = 'session-eeee1111-2222-3333-4444-555555555555'
+  const withNeighbour = makeSession(sessionsRoot, subSlug, keep, subCwd)
+  makeSession(sessionsRoot, subSlug, gone, subCwd)
+
+  // Switch off: nothing is swept, so the caller is told the group went empty
+  // rather than being handed a cleanup it did not ask for.
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ autoPruneEmpty: false }))
+  const off = mountRoutes(root)
+  off.ctx.registry.enabled = true
+  off.ctx.workspaces.set('ws-off', { id: 'ws-off', title: 'off', path: 'd:/work/mono', sessionIds: [gone] })
+  const offRes = await callRoute(off.routes, '/__session-recycle/delete', makeRequest('POST', { sessionId: gone }))
+  check('开关关闭时一个目录都不清', () => {
+    assert.equal(offRes.status, 200)
+    assert.deepEqual(offRes.json().prunedDirs, [])
+    assert.equal(existsSync(join(sessionsRoot, subSlug)), true)
+  })
+
+  // Switch on, but the folder still holds a session: `rmdir` refuses, so the
+  // neighbour is safe and nothing is claimed as cleaned. (The first pass moved
+  // its session out of the store, so put one back.)
+  makeSession(sessionsRoot, subSlug, gone, subCwd)
+  writeFileSync(join(root, 'session-recycle.json'), JSON.stringify({ autoPruneEmpty: true }))
+  const on = mountRoutes(root)
+  on.ctx.registry.enabled = true
+  on.ctx.workspaces.set('ws-on', { id: 'ws-on', title: 'on', path: 'd:/work/mono', sessionIds: [gone] })
+  const onRes = await callRoute(on.routes, '/__session-recycle/delete', makeRequest('POST', { sessionId: gone }))
+  check('目录里还有别的会话时不清，也不谎报', () => {
+    assert.equal(onRes.status, 200)
+    assert.deepEqual(onRes.json().prunedDirs, [])
+    assert.equal(existsSync(withNeighbour), true, '邻居会话必须还在')
+  })
+
+  // Now the last one goes: the folder is empty and is swept.
+  on.ctx.workspaces.set('ws-on', { id: 'ws-on', title: 'on', path: 'd:/work/mono', sessionIds: [keep] })
+  const lastRes = await callRoute(on.routes, '/__session-recycle/delete', makeRequest('POST', { sessionId: keep }))
+  check('最后一个会话删掉后目录才清掉', () => {
+    assert.equal(lastRes.status, 200)
+    assert.deepEqual(lastRes.json().prunedDirs, [join(sessionsRoot, subSlug)])
+    assert.equal(existsSync(join(sessionsRoot, subSlug)), false)
+  })
+  rmSync(root, { recursive: true, force: true })
+}
+
 // --- 5g. /empty-dirs and /prune-empty ---
 {
   const root = mkdtempSync(join(tmpdir(), 'sr-test5g-'))
