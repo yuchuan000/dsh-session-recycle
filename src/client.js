@@ -62,6 +62,30 @@ window.__ModuleLoader__.load({
       'settings.nav': '会话删除',
       'settings.config': '配置',
       'settings.configTitle': '删除设置',
+      // The strip's update control. The verbs are short because they sit next
+      // to Configure in a row of tabs, where a long label reflows the strip;
+      // the commits and the caveats live behind the chip's "?" instead.
+      'settings.update': '更新',
+      'settings.updateCheck': '检查更新',
+      'settings.updateChecking': '检查中…',
+      'settings.updateAvailable': '有更新',
+      'settings.updateClean': '已是最新',
+      'settings.updateApplying': '更新中…',
+      'settings.updateDone': '已更新',
+      'settings.updateFailed': '更新失败',
+      'settings.updateTipCurrent': '当前版本：{commit}（{date}）',
+      'settings.updateTipLatest': '最新版本：{commit}（{date}）',
+      'settings.updateTipBehind': '落后 {n} 个提交',
+      'settings.updateTipClean': '已经是上游最新的一版。',
+      'settings.updateTipNoHistory': '这个副本没有版本信息（没有 git 历史），更新会把它对齐到最新发布。',
+      'settings.updateTipDirty': '这个副本有本地改动，更新会用上游版本覆盖它们。',
+      'settings.updateTipPublished': '已拉到 {commit}，同步了 {n} 个文件到 DSH 实际加载的那份。',
+      'settings.updateTipSelf': '这份就是 DSH 加载的那份，没有第二份要同步。',
+      'settings.updateTipLinked': 'node_modules 里那份是指向这里的链接，本身就是同一批文件。',
+      'settings.updateTipAbsent': '没有 node_modules 副本，跳过同步。',
+      'settings.updateTipPartial': '有 {n} 个文件没能写进去（通常是被占用），重启后再更新一次即可。',
+      'settings.updateTipRestart': '必须完全退出 DSH 再启动才生效，只刷新页面不够。',
+      'settings.updateTipFailed': '更新失败：{error}',
       // The dialog's own explanation, behind the "?" under its title. It used to
       // be the description paragraph; nothing here is read without asking for it.
       'settings.configAbout': '这里的勾选改完立即生效，关掉即生效完毕。',
@@ -195,6 +219,27 @@ window.__ModuleLoader__.load({
       'settings.nav': 'Session deletion',
       'settings.config': 'Settings',
       'settings.configTitle': 'Deletion settings',
+      'settings.update': 'Update',
+      'settings.updateCheck': 'Check for updates',
+      'settings.updateChecking': 'Checking…',
+      'settings.updateAvailable': 'Update available',
+      'settings.updateClean': 'Up to date',
+      'settings.updateApplying': 'Updating…',
+      'settings.updateDone': 'Updated',
+      'settings.updateFailed': 'Update failed',
+      'settings.updateTipCurrent': 'Installed: {commit} ({date})',
+      'settings.updateTipLatest': 'Latest: {commit} ({date})',
+      'settings.updateTipBehind': 'Behind by {n} commit(s)',
+      'settings.updateTipClean': 'Already on the newest release upstream.',
+      'settings.updateTipNoHistory': 'This copy has no version history, so there is nothing to compare — updating aligns it with the latest release.',
+      'settings.updateTipDirty': 'This copy has local changes; updating overwrites them with upstream.',
+      'settings.updateTipPublished': 'Pulled {commit} and published {n} file(s) into the copy DSH loads.',
+      'settings.updateTipSelf': 'This is the copy DSH loads — nothing to publish.',
+      'settings.updateTipLinked': 'The node_modules copy is a link back here, so the files are already the same.',
+      'settings.updateTipAbsent': 'No node_modules copy to publish into; skipped.',
+      'settings.updateTipPartial': '{n} file(s) could not be written (usually locked). Restart DSH and update again.',
+      'settings.updateTipRestart': 'Fully quit DSH and start it again for this to take effect — reloading the page is not enough.',
+      'settings.updateTipFailed': 'Update failed: {error}',
       'settings.configAbout': 'Every tick here applies immediately — just close this when you are done.',
       'settings.close': 'Close',
       'settings.behaviour': 'Behaviour',
@@ -616,6 +661,33 @@ window.__ModuleLoader__.load({
     async function saveSettings(patch) {
       const payload = await api('/__session-recycle/settings', { method: 'POST', body: patch })
       return payload.settings ?? {}
+    }
+
+    /**
+     * Where this plugin stands against its own repository.
+     *
+     * Normalized here rather than read raw: the render decides from
+     * `available`, and a missing field has to land on "ask again", not on a
+     * confident "nothing to do".
+     */
+    async function fetchUpdate() {
+      const payload = await api('/__session-recycle/update')
+      return {
+        available: payload.available === true,
+        installed: payload.installed ?? null,
+        latest: payload.latest ?? null,
+        behind: typeof payload.behind === 'number' ? payload.behind : null,
+      }
+    }
+
+    /** Pull upstream into this plugin's own directory. */
+    async function applyUpdate() {
+      const payload = await api('/__session-recycle/update', { method: 'POST' })
+      return {
+        from: payload.from ?? null,
+        to: payload.to ?? null,
+        published: payload.published ?? null,
+      }
     }
 
     /** Sessions sitting in the recycle bin, newest first. */
@@ -2071,8 +2143,142 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The page's tab strip: one tab per list, plus the Configure button.
+     * What the update chip's bubble says, given what we last learned.
      *
+     * Kept out of the component so it reads as a table rather than as branches
+     * wedged between button props: every line is a fact the reader was owed at
+     * the moment they hovered, and none of them belongs on the strip itself.
+     */
+    function updateTipPoints(__, phase, report, failure) {
+      if (phase === 'failed') {
+        return [__('settings.updateTipFailed', { error: failure || 'unknown error' })]
+      }
+      const points = []
+      if (report?.installed !== undefined && report?.installed !== null) {
+        points.push(__('settings.updateTipCurrent', {
+          commit: report.installed.commit ?? '—',
+          date: report.installed.date ?? '—',
+        }))
+        if (report.installed.dirty === true) points.push(__('settings.updateTipDirty'))
+      } else if (phase === 'available' || phase === 'updated') {
+        points.push(__('settings.updateTipNoHistory'))
+      }
+      if (report?.latest !== undefined && report?.latest !== null) {
+        points.push(__('settings.updateTipLatest', {
+          commit: report.latest.commit ?? '—',
+          date: report.latest.date ?? '—',
+        }))
+      }
+      if (phase === 'clean') points.push(__('settings.updateTipClean'))
+      if (phase === 'available' && typeof report?.behind === 'number') {
+        points.push(__('settings.updateTipBehind', { n: report.behind }))
+      }
+      if (phase === 'updated') {
+        const published = report?.published
+        const copied = Array.isArray(published?.copied) ? published.copied.length : 0
+        points.push(__('settings.updateTipPublished', { commit: report?.to ?? '—', n: copied }))
+        if (published?.state === 'self') points.push(__('settings.updateTipSelf'))
+        if (published?.state === 'linked') points.push(__('settings.updateTipLinked'))
+        if (published?.state === 'absent') points.push(__('settings.updateTipAbsent'))
+        if (Array.isArray(published?.failed) && published.failed.length > 0) {
+          points.push(__('settings.updateTipPartial', { n: published.failed.length }))
+        }
+        points.push(__('settings.updateTipRestart'))
+      }
+      return points
+    }
+
+    /**
+     * The strip's update control, immediately left of Configure.
+     *
+     * One button rather than two, because the verb is decided by what the last
+     * check found: until it answers there is nothing to install, and checking
+     * again only means something once there is nothing to install. Two buttons
+     * would leave one dead at all times, which reads as a bug.
+     *
+     * The details live behind the "?". The commit you are running is something
+     * you look up when deciding whether to update, not every time your eye
+     * crosses the row.
+     */
+    function UpdateButton(props) {
+      const __ = props.__ || t
+      const [phase, setPhase] = useState('idle')
+      const [report, setReport] = useState(null)
+      const [failure, setFailure] = useState('')
+
+      const busy = phase === 'checking' || phase === 'applying'
+
+      const onCheck = async () => {
+        setPhase('checking')
+        setFailure('')
+        try {
+          const answer = await fetchUpdate()
+          setReport(answer)
+          setPhase(answer.available === true ? 'available' : 'clean')
+        } catch (error) {
+          setFailure(error?.message ?? String(error))
+          setPhase('failed')
+        }
+      }
+
+      const onApply = async () => {
+        setPhase('applying')
+        setFailure('')
+        try {
+          const done = await applyUpdate()
+          setReport({ installed: { commit: done.from ?? '—' }, latest: { commit: done.to ?? '—' }, ...done })
+          setPhase('updated')
+        } catch (error) {
+          setFailure(error?.message ?? String(error))
+          setPhase('failed')
+        }
+      }
+
+      const label = busy
+        ? (phase === 'checking' ? __('settings.updateChecking') : __('settings.updateApplying'))
+        : phase === 'available' ? __('settings.updateAvailable')
+        : phase === 'clean' ? __('settings.updateClean')
+        : phase === 'updated' ? __('settings.updateDone')
+        : phase === 'failed' ? __('settings.updateFailed')
+        : __('settings.updateCheck')
+
+      return React.createElement('span', {
+        key: 'update',
+        style: { display: 'inline-flex', alignItems: 'center', gap: 4, flex: 'none' },
+      }, [
+        React.createElement('button', {
+          key: 'go',
+          type: 'button',
+          'data-action': 'update',
+          style: busy ? { ...ghostBtnStyle, opacity: 0.5, cursor: 'default' } : ghostBtnStyle,
+          disabled: busy,
+          onClick: () => {
+            if (busy) return
+            // Checking again after an update is how you learn whether anything
+            // landed, so every settled state re-runs the check rather than
+            // becoming inert.
+            if (phase === 'available') void onApply()
+            else void onCheck()
+          },
+        }, label),
+        React.createElement(InfoTip, {
+          key: 'tip',
+          t: __,
+          placement: 'down',
+          label: __('settings.update'),
+          items: updateTipPoints(__, phase, report, failure),
+        }),
+      ])
+    }
+
+    /**
+     * The page's tab strip: one tab per list, the update control, and the
+     * Configure button.
+     *
+     * The update control sits here, and not inside either pane, for the same
+     * reason the policy settings do: it governs the whole plugin, version and
+     * config alike, and a control that comes and goes with the tab is a control
+     * the user has to hunt for between two lists.
      * The badge says how much each list is holding — the one number that
      * decides whether crossing over is worth a click.
      *
@@ -2119,6 +2325,7 @@ window.__ModuleLoader__.load({
               : null,
           ])
         })),
+        React.createElement(UpdateButton, { key: 'update', __ }),
         React.createElement('button', {
           key: 'config',
           type: 'button',

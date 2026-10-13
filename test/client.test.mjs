@@ -469,6 +469,10 @@ function makeClient({
   emptyGroups = [],
   prunedDirs = null,
   prunedGroups = null,
+  // What the update check answers, and what an install reports. `update ===
+  // null` means the route answers `ok: false`, i.e. no connection upstream.
+  update = { available: false, installed: { commit: 'bbb2222', date: '2026-10-10', dirty: false }, latest: { commit: 'bbb2222', date: '2026-10-10' }, behind: 0 },
+  updateResult = { from: 'aaa1111', to: 'bbb2222', published: { state: 'copied', copied: ['src/index.js', 'src/client.js'], failed: [] } },
   // What the host answers a batch delete with. `emptiedWorkspaces` is what the
   // batch left empty; `removedWorkspaces` is the subset the `autoPruneEmpty`
   // switch then removed.
@@ -592,6 +596,12 @@ function makeClient({
         prunedDirs: deletedPrunedDirs,
         workspaceRemovalFailed,
       })
+    }
+    if (path === '/__session-recycle/update') {
+      if ((options.method ?? 'GET') === 'POST') return respond({ ok: true, ...updateResult })
+      return update === null
+        ? respond({ ok: false, error: 'could not resolve host' })
+        : respond({ ok: true, ...update })
     }
     if (path === '/__session-recycle/restore') return respond({ ok: true, sessionId: body?.sessionId })
     if (path === '/__session-recycle/purge') return respond({ ok: true, sessionId: body?.sessionId })
@@ -813,6 +823,119 @@ await check('页面顶部是标签条：两个列表 + 配置按钮', async () =
   // not mounted yet, so the strip reads the number itself — a badge that only
   // appears once you have clicked is no use as the reason to click.
   assert.equal(textOf(recycle), '回收站1', `还没点就该有数：${textOf(recycle)}`)
+})
+
+/**
+ * The strip, as a list of what each child says — used below to fix the order
+ * of the two controls rather than merely their presence.
+ */
+const stripChildren = (tree) => {
+  const list = nodes(tree, (node) => node.props?.role === 'tablist')[0]
+  const strip = parentOf(tree, list)
+  return strip.children.map((child) => (typeof child === 'string' ? child : textOf(child).trim()))
+}
+
+/** Click the strip's update control and wait for the answer to be rendered. */
+async function pressUpdate(client) {
+  const panel = panelOf(client)
+  const tree = await client.runtime.render(panel)
+  const button = nodes(tree, (node) => node.props?.['data-action'] === 'update')[0]
+  if (!button) throw new Error(`标签条上没有更新按钮：${reachable(tree)}`)
+  button.props.onClick()
+  return client.runtime.settle(panel)
+}
+
+await check('更新控件在配置按钮左边，一开始只说「检查更新」', async () => {
+  const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED })
+  const tree = await tabTree(client)
+  const order = stripChildren(tree)
+  const updateAt = order.findIndex(child => child.includes('检查更新'))
+  const configAt = order.findIndex(child => child === '配置')
+  assert.ok(updateAt >= 0, `缺少「检查更新」：${order.join(' | ')}`)
+  assert.ok(updateAt < configAt, `更新控件应当在配置左边：${order.join(' | ')}`)
+  // Nothing may be fetched before it is asked for: the strip is a row of tabs,
+  // not a place to spend a network round-trip on page open.
+  assert.equal(countCalls(client, '/__session-recycle/update'), 0)
+})
+
+await check('检查完通报：已是最新时不再是「检查更新」', async () => {
+  const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED })
+  const panel = panelOf(client)
+  await pressUpdate(client)
+  let tree = await client.runtime.render(panel)
+  assert.ok(buttonByText(tree, '已是最新'), `应当是「已是最新」：${reachable(tree)}`)
+  assert.equal(countCalls(client, '/__session-recycle/update'), 1)
+
+  const chip = tipChip(tree, '已是最新')
+  assert.ok(chip, `答案旁边应当有一个 ?：${stripChildren(tree).join(' | ')}`)
+  tipAnchor(tree, '已是最新').props.onMouseEnter()
+  await client.runtime.settle(panel)
+  tree = await client.runtime.render(panel)
+  const bubble = textOf(tooltipOf(tree) ?? { children: [] })
+  assert.match(bubble, /aaa1111|bbb2222/, `气泡里应当有版本号：${bubble}`)
+  assert.match(bubble, /最新/, `应当说清是不是最新：${bubble}`)
+})
+
+await check('有更新时按钮变成「有更新」，点下去走 POST', async () => {
+  const client = makeClient({
+    sessions: SESSIONS,
+    recycled: RECYCLED,
+    update: {
+      available: true,
+      installed: { commit: 'aaa1111', date: '2026-10-01', dirty: false },
+      latest: { commit: 'bbb2222', date: '2026-10-10' },
+      behind: 3,
+    },
+  })
+  const panel = panelOf(client)
+  let tree = await pressUpdate(client)
+  tree = await client.runtime.render(panel)
+  const go = buttonByText(tree, '有更新')
+  assert.ok(go, `检查完应当是「有更新」：${reachable(tree)}`)
+
+  go.props.onClick()
+  tree = await client.runtime.settle(panel)
+  tree = await client.runtime.render(panel)
+  assert.equal(countCalls(client, '/__session-recycle/update'), 2, '第二次请求才是安装')
+  const posted = client.calls.filter(call => call.path === '/__session-recycle/update')[1]
+  assert.equal(posted.method, 'POST', `安装是 POST：${posted.method}`)
+  assert.ok(buttonByText(tree, '已更新'), `装完应当说「已更新」：${reachable(tree)}`)
+})
+
+await check('更新完的气泡说清三件事：装到了哪一版、同步了几份、要重启', async () => {
+  const client = makeClient({
+    sessions: SESSIONS,
+    recycled: RECYCLED,
+    update: { available: true, installed: { commit: 'aaa1111', date: '2026-10-01', dirty: false }, latest: { commit: 'bbb2222', date: '2026-10-10' }, behind: 3 },
+  })
+  const panel = panelOf(client)
+  await pressUpdate(client)
+  let tree = await client.runtime.render(panel)
+  buttonByText(tree, '有更新').props.onClick()
+  await client.runtime.settle(panel)
+  tree = await client.runtime.render(panel)
+
+  tipAnchor(tree, '已更新').props.onMouseEnter()
+  await client.runtime.settle(panel)
+  tree = await client.runtime.render(panel)
+  const bubble = textOf(tooltipOf(tree) ?? { children: [] })
+  assert.match(bubble, /bbb2222/, `应当说装到了哪一版：${bubble}`)
+  assert.match(bubble, /2 个文件/, `应当说同步了几份文件：${bubble}`)
+  assert.match(bubble, /重启|再启动/, `不说重启等于让用户以为已经生效：${bubble}`)
+})
+
+await check('检查失败不说谎：按钮变成「更新失败」，气泡里带着原因', async () => {
+  const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED, update: null })
+  const panel = panelOf(client)
+  await pressUpdate(client)
+  let tree = await client.runtime.render(panel)
+  assert.ok(buttonByText(tree, '更新失败'), `应当是「更新失败」：${reachable(tree)}`)
+
+  tipAnchor(tree, '更新失败').props.onMouseEnter()
+  await client.runtime.settle(panel)
+  tree = await client.runtime.render(panel)
+  const bubble = textOf(tooltipOf(tree) ?? { children: [] })
+  assert.match(bubble, /could not resolve host/, `气泡里应当有失败原因：${bubble}`)
 })
 
 await check('回收站条数：开页就报，来回切也不重读', async () => {

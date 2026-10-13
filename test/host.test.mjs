@@ -9,7 +9,7 @@
  * NODE_PATH-style resolution at it, or `pnpm install` the peer dependency.
  */
 import { strict as assert } from 'node:assert'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, readFileSync, lstatSync, linkSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -892,6 +892,273 @@ for (const [auto, expectRemoved] of [[true, true], [false, false]]) {
   })
 
   rmSync(root, { recursive: true, force: true })
+}
+
+// --- 6. self-update --------------------------------------------------------
+//
+// The git half is driven through a fake `run`: git is a child process in
+// production, and what is worth pinning down here is *which commands get
+// issued* and *what the answers mean*, not whether git works on this machine.
+// The publishing half runs against real files, because its contract is about
+// inodes and hard links — nothing fake can demonstrate it.
+
+/**
+ * A stand-in for running git: scripted answers, and a record of every call.
+ *
+ * @param head      this copy's commit (`bbb2222` by default so that "already
+ *                  up to date" is the starting case rather than the surprise)
+ * @param failures  git subcommands that should fail, keyed by subcommand name
+ */
+function fakeGit({
+  head = 'bbb2222',
+  date = '2026-10-01',
+  upstream = 'bbb2222',
+  upstreamDate = '2026-10-10',
+  behind = 0,
+  remote = 'https://github.com/yuchuan000/dsh-session-recycle.git',
+  noRepo = false,
+  failures = {},
+} = {}) {
+  const calls = []
+  // Git is a child process in production and has memory here: `init` makes the
+  // directory answer like a repository, and `checkout` moves HEAD. Without
+  // that second part nothing can tell whether an install actually landed.
+  const state = { repo: noRepo !== true, head }
+  const run = async (args) => {
+    calls.push(args.join(' '))
+    const failure = failures[args[0]]
+    if (failure !== undefined) throw new Error(failure)
+    const [sub] = args
+    if (sub === 'init') { state.repo = true; return '' }
+    if (!state.repo) throw new Error('not a git repository')
+    if (sub === 'checkout') { state.head = upstream; return '' }
+    switch (sub) {
+      case 'rev-parse':
+        if (args[1] === '--short' && args[2] === 'FETCH_HEAD') return upstream
+        if (args[1] === '--short') return state.head
+        return 'main'
+      case 'log': return args.includes('FETCH_HEAD') ? upstreamDate : date
+      case 'remote': return args[1] === 'get-url' ? remote : ''
+      case 'status': return ''
+      case 'rev-list': return String(behind)
+      default: return ''
+    }
+  }
+  return { run, calls }
+}
+
+{
+  const { run } = fakeGit()
+  const answer = await mod.checkSelfUpdate({ root: '/tmp/whatever', run })
+  check('已是最新：available=false，behind=0，并把两边都报出来', () => {
+    assert.equal(answer.ok, true)
+    assert.equal(answer.available, false)
+    assert.equal(answer.behind, 0)
+    assert.equal(answer.installed.commit, 'bbb2222')
+    assert.equal(answer.installed.dirty, false)
+    assert.equal(answer.latest.commit, 'bbb2222')
+  })
+}
+
+{
+  const { run } = fakeGit({ head: 'aaa1111', behind: 3 })
+  const answer = await mod.checkSelfUpdate({ root: '/tmp/whatever', run })
+  check('落后 3 个提交：available=true 且报出落后数', () => {
+    assert.equal(answer.ok, true)
+    assert.equal(answer.available, true)
+    assert.equal(answer.behind, 3)
+    assert.equal(answer.installed.commit, 'aaa1111')
+  })
+}
+
+{
+  const { run } = fakeGit({ failures: { fetch: 'could not resolve host' } })
+  const answer = await mod.checkSelfUpdate({ root: '/tmp/whatever', run })
+  check('连不上上游：ok=false 并保留已装版本，不说「已是最新」', () => {
+    assert.equal(answer.ok, false)
+    assert.equal(answer.code, 'FETCH_FAILED')
+    assert.match(answer.error, /could not resolve host/)
+    // 「连不上」不能退化成「没有更新」，否则网络一断按钮就永远绿着。
+    assert.equal(answer.available, undefined)
+    assert.notEqual(answer.installed, null)
+  })
+}
+
+{
+  const { run, calls } = fakeGit({ noRepo: true, head: 'x' })
+  const answer = await mod.checkSelfUpdate({ root: '/tmp/whatever', run })
+  check('副本不是 git 仓库：就地 git init 接管，不删目录', () => {
+    assert.equal(answer.adopted, true)
+    assert.equal(calls.includes('init -q'), true, '必须 git init，而不是 clone 到非空目录')
+    assert.equal(calls.some(call => call.startsWith('fetch')), true)
+  })
+  check('没有历史的副本一律算可更新，behind 报 null 而不是 0', () => {
+    assert.equal(answer.available, true)
+    assert.equal(answer.behind, null)
+    assert.equal(answer.installed, null)
+  })
+}
+
+{
+  const { run, calls } = fakeGit({ remote: 'https://github.com/evil/loot.git' })
+  const answer = await mod.checkSelfUpdate({ root: '/tmp/whatever', run })
+  check('remote 被指向别处：改成自己的仓库再拉', () => {
+    assert.equal(answer.remoteFixed, true)
+    const fixed = calls.find(call => call.startsWith('remote set-url'))
+    assert.match(fixed, /dsh-session-recycle\.git$/)
+  })
+}
+
+{
+  const { run, calls } = fakeGit({ remote: 'git@github.com:yuchuan000/dsh-session-recycle.git' })
+  const answer = await mod.checkSelfUpdate({ root: '/tmp/whatever', run })
+  check('ssh 写法的 remote 是同一个仓库，不该被改掉', () => {
+    assert.equal(answer.remoteFixed, false)
+    assert.equal(calls.some(call => call.startsWith('remote set-url')), false)
+  })
+}
+
+{
+  const { run, calls } = fakeGit({ head: 'aaa1111', behind: 2, noRepo: false })
+  const done = await mod.applySelfUpdate({ root: '/tmp/whatever', run })
+  check('安装：checkout 到 FETCH_HEAD 并回报 from → to', () => {
+    assert.equal(calls.includes('checkout -f -B main FETCH_HEAD'), true)
+    assert.equal(done.from, 'aaa1111')
+    assert.equal(done.to, 'bbb2222')
+    assert.equal(done.restartRequired, true)
+  })
+}
+
+{
+  const { run, calls } = fakeGit({ head: 'aaa1111', failures: { fetch: 'offline' } })
+  let thrown = null
+  try { await mod.applySelfUpdate({ root: '/tmp/whatever', run }) } catch (error) { thrown = error }
+  check('拉不到就不动文件：checkout 一步都没执行', () => {
+    assert.ok(thrown, 'fetch 失败必须抛出，让路由回 500')
+    assert.equal(calls.some(call => call.startsWith('checkout')), false)
+  })
+}
+
+// --- 6b. publishing into the copy DSH loads --------------------------------
+
+/** A profile skeleton: <base>/vendor/<name> plus <base>/node_modules/<name>. */
+function makeInstall(files = ['src/index.js']) {
+  const base = mkdtempSync(join(tmpdir(), 'sr-selfupd-'))
+  const root = join(base, 'vendor', 'dsh-session-recycle')
+  const target = join(base, 'node_modules', 'dsh-session-recycle')
+  for (const dir of ['src', 'lib']) mkdirSync(join(root, dir), { recursive: true })
+  mkdirSync(join(target, 'src'), { recursive: true })
+  for (const file of files) {
+    writeFileSync(join(root, file), 'new\n')
+    writeFileSync(join(target, file), 'old\n')
+  }
+  writeFileSync(join(root, 'README.md'), 'readme-new\n')
+  writeFileSync(join(target, 'README.md'), 'readme-old\n')
+  return { base, root, target }
+}
+
+{
+  const { base, root, target } = makeInstall()
+  const file = join(target, 'src', 'index.js')
+  const before = lstatSync(file).ino
+  const done = mod.syncLoadedCopy({ root })
+  check('覆盖了 DSH 加载的那份：内容与 vendor 那份一致', () => {
+    assert.equal(done.state, 'copied')
+    assert.ok(done.copied.includes('src/index.js'))
+    assert.equal(readFileSync(file, 'utf8'), 'new\n')
+    assert.equal(readFileSync(join(target, 'README.md'), 'utf8'), 'readme-new\n')
+  })
+  check('inode 不变：硬链接的另一端同步生效（这就是必须先写后覆盖的原因）', () => {
+    // 少数文件系统不给真实的 inode；那种情况下这条不测，而不是假装通过了。
+    if (before === 0) return
+    assert.equal(lstatSync(file).ino, before, '覆盖必须复用同一个 inode')
+  })
+  rmSync(base, { recursive: true, force: true })
+}
+
+{
+  // The whole point, demonstrated rather than asserted: find out what a hard
+  // link does when the file it points at is copied over in place.
+  const base = mkdtempSync(join(tmpdir(), 'sr-hardlink-'))
+  const original = join(base, 'repo-file.txt')
+  const linked = join(base, 'node_modules-file.txt')
+  writeFileSync(original, 'old\n')
+  try {
+    linkSync(original, linked)
+    assert.equal(readFileSync(linked, 'utf8'), 'old\n')
+    writeFileSync(join(base, 'next.txt'), 'new\n')
+    const { copyFileSync } = await import('node:fs')
+    copyFileSync(join(base, 'next.txt'), original)
+    check('硬链接两边是同一个文件：覆盖一边，另一边跟着变', () => {
+      assert.equal(readFileSync(linked, 'utf8'), 'new\n')
+    })
+  } catch (error) {
+    check('硬链接两边是同一个文件：覆盖一边，另一边跟着变', () => {
+      process.stdout.write(`\n      （这台机器的文件系统不支持硬链接：${error.message}）\n`)
+    })
+  }
+  rmSync(base, { recursive: true, force: true })
+}
+
+{
+  const base = mkdtempSync(join(tmpdir(), 'sr-linked-'))
+  const root = join(base, 'vendor', 'dsh-session-recycle')
+  mkdirSync(join(root, 'src'), { recursive: true })
+  writeFileSync(join(root, 'src', 'index.js'), 'new\n')
+  mkdirSync(join(base, 'node_modules'), { recursive: true })
+  symlinkSync(root, join(base, 'node_modules', 'dsh-session-recycle'), 'junction')
+  const done = mod.syncLoadedCopy({ root })
+  check('node_modules 里是链接：不用同步，也不许把链接拆开', () => {
+    assert.equal(done.state, 'linked')
+    assert.equal(done.copied.length, 0)
+  })
+  rmSync(base, { recursive: true, force: true })
+}
+
+{
+  const base = mkdtempSync(join(tmpdir(), 'sr-absent-'))
+  const root = join(base, 'vendor', 'dsh-session-recycle')
+  mkdirSync(join(root, 'src'), { recursive: true })
+  const done = mod.syncLoadedCopy({ root })
+  check('没有 node_modules 副本：跳过，而不是自己造一个', () => {
+    assert.equal(done.state, 'absent')
+    assert.equal(existsSync(join(base, 'node_modules')), false)
+  })
+  rmSync(base, { recursive: true, force: true })
+}
+
+{
+  const { base, root, target } = makeInstall()
+  // Whatever the user left beside the plugin. Publishing *everything* would
+  // copy a backup directory into node_modules, where it becomes dead weight
+  // nothing cleans up.
+  mkdirSync(join(root, 'dsh-session-recycle.bak-2026'), { recursive: true })
+  writeFileSync(join(root, 'dsh-session-recycle.bak-2026', 'client.js'), 'stale\n')
+  writeFileSync(join(root, 'notes.txt'), 'private\n')
+  mod.syncLoadedCopy({ root })
+  check('只发布属于插件的文件：备份目录和用户文件不动', () => {
+    assert.equal(existsSync(join(target, 'dsh-session-recycle.bak-2026')), false)
+    assert.equal(existsSync(join(target, 'notes.txt')), false)
+    assert.equal(readFileSync(join(target, 'src', 'index.js'), 'utf8'), 'new\n')
+  })
+  rmSync(base, { recursive: true, force: true })
+}
+
+// --- 6c. the update route itself -------------------------------------------
+
+{
+  const { routes } = mountRoutes(mkdtempSync(join(tmpdir(), 'sr-route-')))
+  await acheck('/update 只读的安全护栏：跨域请求一律 403', async () => {
+    const response = await callRoute(routes, '/__session-recycle/update',
+      makeRequest('GET', undefined, { 'sec-fetch-site': 'cross-site' }))
+    assert.equal(response.status, 403)
+  })
+
+  await acheck('/update 接受 GET 与 POST，其它方法 405', async () => {
+    const notAllowed = await callRoute(routes, '/__session-recycle/update', makeRequest('DELETE'))
+    assert.equal(notAllowed.status, 405)
+    assert.equal(routes.has('/__session-recycle/update'), true, '路由必须注册')
+  })
 }
 
 for (const r of results) {
