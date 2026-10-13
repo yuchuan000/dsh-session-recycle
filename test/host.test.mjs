@@ -916,6 +916,9 @@ function fakeGit({
   upstreamDate = '2026-10-10',
   behind = 0,
   remote = 'https://github.com/yuchuan000/dsh-session-recycle.git',
+  // What `git remote` lists. A `.git` left by `git init` alone has none, which
+  // is the case where `git remote set-url` refuses to run at all.
+  remotes = ['origin'],
   noRepo = false,
   failures = {},
 } = {}) {
@@ -938,7 +941,7 @@ function fakeGit({
         if (args[1] === '--short') return state.head
         return 'main'
       case 'log': return args.includes('FETCH_HEAD') ? upstreamDate : date
-      case 'remote': return args[1] === 'get-url' ? remote : ''
+      case 'remote': return args[1] === 'get-url' ? remote : remotes.join('\n')
       case 'status': return ''
       case 'rev-list': return String(behind)
       default: return ''
@@ -1006,6 +1009,20 @@ function fakeGit({
     assert.equal(answer.remoteFixed, true)
     const fixed = calls.find(call => call.startsWith('remote set-url'))
     assert.match(fixed, /dsh-session-recycle\.git$/)
+  })
+}
+
+{
+  // 只有 .git 没有 remote（git init 出来的样子）：set-url 会直接报
+  // "No such remote 'origin'"，整个检查会变成 500——必须走 add。
+  const { run, calls } = fakeGit({ remote: '', remotes: [] })
+  const answer = await mod.checkSelfUpdate({ root: '/tmp/whatever', run })
+  check('仓库里还没有 origin：用 remote add，而不是 set-url', () => {
+    assert.equal(answer.remoteFixed, true)
+    assert.equal(calls.some(call => call.startsWith('remote set-url')), false, 'set-url 在没有 origin 时会报错')
+    const added = calls.find(call => call.startsWith('remote add'))
+    assert.ok(added, `应当 remote add：${calls.join(' | ')}`)
+    assert.match(added, /dsh-session-recycle\.git$/)
   })
 }
 
