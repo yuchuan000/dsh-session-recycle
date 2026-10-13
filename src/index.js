@@ -1871,6 +1871,24 @@ export function loadedCopyRoot(root = selfRoot()) {
 }
 
 /**
+ * Whether two paths are already the same file.
+ *
+ * Not a redundant check: a `file:` dependency installed as hard links leaves
+ * `vendor/x` and `node_modules/x` pointing at one inode, and copying a file
+ * onto *itself* truncates it before it is read — which empties it. The copy
+ * that would "publish" the file is the copy that destroys it.
+ */
+function sameFile(a, b) {
+  try {
+    const left = fs.statSync(a)
+    const right = fs.statSync(b)
+    return left.ino !== 0 && left.ino === right.ino && left.dev === right.dev
+  } catch {
+    return false
+  }
+}
+
+/**
  * Publish this copy's files over whichever copy DSH loads.
  *
  * `copyFileSync` rather than remove-then-write: it rewrites an existing file's
@@ -1880,12 +1898,12 @@ export function loadedCopyRoot(root = selfRoot()) {
  */
 export function syncLoadedCopy({ root = selfRoot() } = {}) {
   const target = loadedCopyRoot(root)
-  if (target === root) return { state: 'self', copied: [], failed: [] }
-  if (!fs.existsSync(target)) return { state: 'absent', copied: [], failed: [] }
+  if (target === root) return { state: 'self', copied: [], shared: [], failed: [] }
+  if (!fs.existsSync(target)) return { state: 'absent', copied: [], shared: [], failed: [] }
   try {
-    if (fs.lstatSync(target).isSymbolicLink()) return { state: 'linked', copied: [], failed: [] }
+    if (fs.lstatSync(target).isSymbolicLink()) return { state: 'linked', copied: [], shared: [], failed: [] }
   } catch {
-    return { state: 'absent', copied: [], failed: [] }
+    return { state: 'absent', copied: [], shared: [], failed: [] }
   }
 
   const pairs = []
@@ -1904,9 +1922,12 @@ export function syncLoadedCopy({ root = selfRoot() } = {}) {
   }
 
   const copied = []
+  const shared = []
   const failed = []
   for (const [from, to, label] of pairs) {
     try {
+      // Already one file: nothing to publish, and copying would empty it.
+      if (sameFile(from, to)) { shared.push(label); continue }
       fs.copyFileSync(from, to)
       copied.push(label)
     } catch (error) {
@@ -1916,7 +1937,7 @@ export function syncLoadedCopy({ root = selfRoot() } = {}) {
       failed.push({ file: label, error: error?.message ?? String(error) })
     }
   }
-  return { state: 'copied', copied, failed }
+  return { state: 'copied', copied, shared, failed }
 }
 
 /** Register the client-facing routes; returns a disposer. */

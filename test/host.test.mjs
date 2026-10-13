@@ -1077,6 +1077,24 @@ function makeInstall(files = ['src/index.js']) {
 }
 
 {
+  // 本机真实踩过的坑：pnpm 把 `file:` 依赖装成硬链接，vendor 与 node_modules
+  // 里那个文件是同一个 inode。这时候再 copyFileSync(from → to) 就是往自己身上
+  // 写：先截断再读，文件当场被清空。
+  const { base, root, target } = makeInstall()
+  const vendorFile = join(root, 'src', 'index.js')
+  const copyFile = join(target, 'src', 'index.js')
+  rmSync(copyFile)
+  linkSync(vendorFile, copyFile)
+  const done = mod.syncLoadedCopy({ root })
+  check('硬链接副本：认出是同一个文件，不许再写一遍（写了就清空）', () => {
+    assert.ok(done.shared.includes('src/index.js'), `应当认出是同一个文件：${JSON.stringify(done)}`)
+    assert.equal(done.copied.includes('src/index.js'), false)
+    assert.equal(readFileSync(vendorFile, 'utf8'), 'new\n', '文件绝不能被清空')
+  })
+  rmSync(base, { recursive: true, force: true })
+}
+
+{
   // The whole point, demonstrated rather than asserted: find out what a hard
   // link does when the file it points at is copied over in place.
   const base = mkdtempSync(join(tmpdir(), 'sr-hardlink-'))
