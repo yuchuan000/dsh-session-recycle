@@ -924,18 +924,66 @@ await check('更新完的气泡说清三件事：装到了哪一版、同步了�
   assert.match(bubble, /重启|再启动/, `不说重启等于让用户以为已经生效：${bubble}`)
 })
 
-await check('检查失败不说谎：按钮变成「更新失败」，气泡里带着原因', async () => {
+await check('检查失败不说谎：按钮变成「检查失败」，气泡里带着原因', async () => {
   const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED, update: null })
   const panel = panelOf(client)
   await pressUpdate(client)
   let tree = await client.runtime.render(panel)
-  assert.ok(buttonByText(tree, '更新失败'), `应当是「更新失败」：${reachable(tree)}`)
+  assert.ok(buttonByText(tree, '检查失败'), `应当是「检查失败」：${reachable(tree)}`)
 
-  tipAnchor(tree, '更新失败').props.onMouseEnter()
+  tipAnchor(tree, '检查失败').props.onMouseEnter()
   await client.runtime.settle(panel)
   tree = await client.runtime.render(panel)
   const bubble = textOf(tooltipOf(tree) ?? { children: [] })
   assert.match(bubble, /could not resolve host/, `气泡里应当有失败原因：${bubble}`)
+  // 只说「失败」等于让人再猜一遍：连不上、没 git、没权限，三条里总有一条是答案。
+  assert.match(bubble, /GitHub|git|权限|DNS/, `气泡里应当有可读的原因：${bubble}`)
+})
+
+await check('气泡挂在控件自己身上：不会因为没有定位祖先而飞到屏幕外', async () => {
+  const client = makeClient({ sessions: SESSIONS, recycled: RECYCLED })
+  const panel = panelOf(client)
+  await pressUpdate(client)
+  let tree = await client.runtime.render(panel)
+  const button = nodes(tree, (node) => node.props?.['data-action'] === 'update')[0]
+  const wrapper = parentOf(tree, button)
+  // `top: 100%` 需要一个定位过的祖先，否则它拿整页（甚至文档）当参照，
+  // 气泡被放到一屏之外 —— 表现就是鼠标放上去什么也不显示。
+  assert.equal(wrapper.props.style?.position, 'relative', '更新控件必须是气泡的定位祖先')
+
+  tipAnchor(tree, '已是最新').props.onMouseEnter()
+  await client.runtime.settle(panel)
+  tree = await client.runtime.render(panel)
+  const bubble = tooltipOf(tree)
+  assert.ok(bubble, `悬停后应当有气泡：${reachable(tree)}`)
+  assert.equal(bubble.props.style.top, '100%', '向下开')
+  // 控件在标签条最右端，气泡只能往左长，否则会溢出页面被裁掉。
+  assert.equal(bubble.props.style.right, 0, '靠右对齐')
+  assert.equal(bubble.props.style.left, 'auto', '靠右对齐')
+})
+
+await check('翻到别的插件页面再回来：检查的状态和答案都还在', async () => {
+  const client = makeClient({
+    sessions: SESSIONS,
+    recycled: RECYCLED,
+    update: {
+      available: true,
+      installed: { commit: 'aaa1111', date: '2026-10-01', dirty: false },
+      latest: { commit: 'bbb2222', date: '2026-10-10' },
+      behind: 3,
+    },
+  })
+  const panel = panelOf(client)
+  await pressUpdate(client)
+  let tree = await client.runtime.render(panel)
+  assert.ok(buttonByText(tree, '有更新'), `检查完应当是「有更新」：${reachable(tree)}`)
+
+  // 切到别的插件页面再回来：外壳把整个面板卸载重挂，组件自己的 state 全丢。
+  // 更新状态存在模块里，所以回来时答案还在，也不会白查一次。
+  client.runtime.state.instances.clear()
+  tree = await client.runtime.render(panel)
+  assert.ok(buttonByText(tree, '有更新'), `回来之后应当还是「有更新」：${reachable(tree)}`)
+  assert.equal(countCalls(client, '/__session-recycle/update'), 1, '回来不该重新查一遍')
 })
 
 await check('回收站条数：开页就报，来回切也不重读', async () => {
